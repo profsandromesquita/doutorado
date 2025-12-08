@@ -1196,7 +1196,7 @@ def fase3_ca_cb(
         N_coord = coords[N_id]
         C_coord = coords[C_id]
 
-        # Busca candidatos por distância
+        # Busca candidatos por distância (1.40-1.60 Å)
         candidates = []
         for s in all_serials:
             if s in locked:
@@ -1206,29 +1206,55 @@ def fase3_ca_cb(
             d = dist_tuple(CA_coord, cand_coord)
 
             if 1.40 <= d <= 1.60:
-                # Calcula ângulo N-CA-candidato
-                # Precisa converter coords para dict temporário
+                # Calcula AMBOS ângulos: N-CA-candidato E C-CA-candidato
                 ca_dict = {'x': CA_coord[0], 'y': CA_coord[1], 'z': CA_coord[2]}
                 n_dict = {'x': N_coord[0], 'y': N_coord[1], 'z': N_coord[2]}
+                c_dict = {'x': C_coord[0], 'y': C_coord[1], 'z': C_coord[2]}
                 cand_dict = {'x': cand_coord[0], 'y': cand_coord[1], 'z': cand_coord[2]}
 
                 theta_N = angle(n_dict, ca_dict, cand_dict)
-                candidates.append((s, d, theta_N))
+                theta_C = angle(c_dict, ca_dict, cand_dict)
+                candidates.append((s, d, theta_N, theta_C))
 
         if not candidates:
             continue
 
-        # Refinamento por ângulo
+        # Refinamento por ângulo (igual ao script original)
         if len(candidates) > 1:
-            # REF1: 104-116
-            filtered = [(s, d, t) for (s, d, t) in candidates if 104.0 <= t <= 116.0]
-            if filtered:
-                candidates = filtered
+            # Enriquece com cálculo de ângulos (já feito acima)
+            enriched = [(s, d, tN, tC) for (s, d, tN, tC) in candidates
+                        if tN is not None and tC is not None]
 
-            # REF3: mais próximo de 110
-            candidates.sort(key=lambda x: abs(x[2] - 110.0))
+            if not enriched:
+                # Fallback: usa só distância se ângulos degeneraram
+                candidates.sort(key=lambda x: x[1])
+                chosen_serial = candidates[0][0]
+            else:
+                # Filtra por janelas de ângulo:
+                # N-CA-CB: [104°, 116°]
+                # C-CA-CB: [105°, 118°]
+                filtered = [
+                    (s, d, tN, tC)
+                    for (s, d, tN, tC) in enriched
+                    if 104.0 <= tN <= 116.0 and 105.0 <= tC <= 118.0
+                ]
 
-        chosen_serial = candidates[0][0]
+                if filtered:
+                    working = filtered
+                else:
+                    # Se nenhum satisfaz as janelas, usa todos
+                    working = enriched
+
+                # Desempate: minimiza |θN - 110| + |θC - 111|
+                def score(item):
+                    _, _, tN, tC = item
+                    return abs(tN - 110.0) + abs(tC - 111.0)
+
+                working.sort(key=score)
+                chosen_serial = working[0][0]
+        else:
+            # Só um candidato
+            chosen_serial = candidates[0][0]
 
         # Swap se necessário
         if chosen_serial != CB_id:
