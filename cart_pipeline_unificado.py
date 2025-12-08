@@ -800,6 +800,112 @@ def escolher_pesado_com_angulo(
     return candidatos[0]
 
 
+def escolher_cz_tyr(
+    atoms: List[Dict],
+    locked: Set[int],
+    idx_CE1: int,
+    idx_CE2: int,
+    dmin: float = 1.30,
+    dmax: float = 1.50,
+    d_alvo: float = 1.40
+) -> Tuple[int, float, float, float]:
+    """
+    Escolhe CZ de TYR como átomo que esteja entre CE1 e CE2 com:
+      d(CE1,CZ) e d(CE2,CZ) ambos em [dmin,dmax],
+    minimizando |d1 - d_alvo| + |d2 - d_alvo|.
+
+    Retorna: (idx, d1, d2, score)
+    """
+    CE1 = atoms[idx_CE1]
+    CE2 = atoms[idx_CE2]
+
+    candidatos = []
+    for i, a in enumerate(atoms):
+        if i in locked:
+            continue
+        d1 = dist(CE1, a)
+        d2 = dist(CE2, a)
+        if dmin <= d1 <= dmax and dmin <= d2 <= dmax:
+            score = abs(d1 - d_alvo) + abs(d2 - d_alvo)
+            candidatos.append((i, d1, d2, score))
+
+    if not candidatos:
+        raise RuntimeError("Nenhum candidato encontrado para CZ respeitando CE1/CE2.")
+
+    candidatos.sort(key=lambda t: t[3])
+    return candidatos[0]
+
+
+def escolher_oh_tyr(
+    atoms: List[Dict],
+    locked: Set[int],
+    idx_CZ: int,
+    idx_CE1: int,
+    idx_CE2: int,
+    dmin: float = 1.30,
+    dmax: float = 1.50,
+    ang1_min: float = 114.0,
+    ang1_max: float = 126.0,
+    ang2_min: float = 117.0,
+    ang2_max: float = 123.0,
+    alvo_angulo: float = 120.0
+) -> Tuple[int, float, float, float, float]:
+    """
+    Seleciona OH de TYR com:
+      - d(CZ,OH) em [dmin,dmax]
+      - ângulo efetivo = média de CE1-CZ-cand e CE2-CZ-cand
+        para aplicar os refinamentos 114-126 / 117-123 / ~120.
+
+    Retorna: (idx, dist, ang_eff, ang_ce1, ang_ce2)
+    """
+    CZ = atoms[idx_CZ]
+    CE1 = atoms[idx_CE1]
+    CE2 = atoms[idx_CE2]
+
+    base = []
+    for i, a in enumerate(atoms):
+        if i in locked or i == idx_CZ:
+            continue
+        d = dist(CZ, a)
+        if dmin <= d <= dmax:
+            ang1 = angle(CE1, CZ, a)
+            ang2 = angle(CE2, CZ, a)
+            ang_eff = 0.5 * (ang1 + ang2)
+            base.append((i, d, ang_eff, ang1, ang2))
+
+    if not base:
+        raise RuntimeError("Nenhum candidato encontrado para OH em torno de CZ.")
+
+    if len(base) == 1:
+        return base[0]
+
+    # REF1
+    prev_list = base
+    prev_count = len(prev_list)
+    ref1 = [(i, d, ang_eff, a1, a2) for (i, d, ang_eff, a1, a2) in prev_list
+            if ang1_min <= ang_eff <= ang1_max]
+    if len(ref1) == 0 and prev_count >= 2:
+        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
+        return ref3[0]
+    if len(ref1) == 1:
+        return ref1[0]
+
+    # REF2
+    prev_list = ref1
+    prev_count = len(prev_list)
+    ref2 = [(i, d, ang_eff, a1, a2) for (i, d, ang_eff, a1, a2) in prev_list
+            if ang2_min <= ang_eff <= ang2_max]
+    if len(ref2) == 0 and prev_count >= 2:
+        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
+        return ref3[0]
+    if len(ref2) == 1:
+        return ref2[0]
+
+    # REF3 em ref2
+    ref3 = sorted(ref2, key=lambda t: abs(t[2] - alvo_angulo))
+    return ref3[0]
+
+
 # ==============================================================================
 # SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE (DFS COMPLETO)
 # ==============================================================================
@@ -1752,6 +1858,15 @@ def processar_tyr(
             if verbose:
                 print(f"    AVISO CG: {e}")
 
+    # CG -> HG (como no original TYR 579)
+    idx_HG = name2idx.get("HG")
+    if idx_HG is not None and idx_CG is not None:
+        atribuir_coord_alvos(
+            atoms, locked, idx_CG, [idx_HG],
+            dmin_init=0.995, dmax_init=1.115,
+            target_count=1, label="HG"
+        )
+
     # CG -> CD1 (aromático)
     if idx_CD1 is not None and idx_CG is not None and idx_CB is not None:
         try:
@@ -1856,15 +1971,13 @@ def processar_tyr(
             target_count=1, label="HE2"
         )
 
-    # CZ (entre CE1 e CE2)
-    if idx_CZ is not None and idx_CE1 is not None and idx_CD1 is not None:
+    # CZ (entre CE1 e CE2 - usa distância dupla como no original TYR 579)
+    if idx_CZ is not None and idx_CE1 is not None and idx_CE2 is not None:
         try:
-            cand_idx, d, ang = escolher_pesado_com_angulo(
-                atoms, locked, idx_CE1, idx_CD1,
-                dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0,
-                ang2_min=117.0, ang2_max=123.0,
-                alvo_angulo=120.0, label="CZ"
+            cand_idx, d1, d2, score = escolher_cz_tyr(
+                atoms, locked,
+                idx_CE1=idx_CE1, idx_CE2=idx_CE2,
+                dmin=1.30, dmax=1.50, d_alvo=1.40
             )
             if not same_coords(atoms[idx_CZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_CZ], atoms[cand_idx])
@@ -1873,15 +1986,16 @@ def processar_tyr(
             if verbose:
                 print(f"    AVISO CZ: {e}")
 
-    # CZ -> OH
-    if idx_OH is not None and idx_CZ is not None and idx_CE1 is not None:
+    # CZ -> OH (usa ângulo médio CE1-CZ-cand e CE2-CZ-cand como no original TYR 579)
+    if idx_OH is not None and idx_CZ is not None and idx_CE1 is not None and idx_CE2 is not None:
         try:
-            cand_idx, d, ang = escolher_pesado_com_angulo(
-                atoms, locked, idx_CZ, idx_CE1,
+            cand_idx, d, ang_eff, ang_ce1, ang_ce2 = escolher_oh_tyr(
+                atoms, locked,
+                idx_CZ=idx_CZ, idx_CE1=idx_CE1, idx_CE2=idx_CE2,
                 dmin=1.30, dmax=1.50,
                 ang1_min=114.0, ang1_max=126.0,
                 ang2_min=117.0, ang2_max=123.0,
-                alvo_angulo=120.0, label="OH"
+                alvo_angulo=120.0
             )
             if not same_coords(atoms[idx_OH], atoms[cand_idx]):
                 swap_coords(atoms[idx_OH], atoms[cand_idx])
