@@ -700,98 +700,270 @@ def escolher_pesado_com_angulo(
     ang2_min: float = 104.0,
     ang2_max: float = 116.0,
     alvo_angulo: float = 110.0,
+    label: str = "PESO",
+    idx_angle_a: int = None,
+    idx_angle_b: int = None,
+    expand_distance: bool = False,
     delta: float = 0.005,
-    max_iter: int = 200,
-    label: str = "PESO"
+    max_iter: int = 200
 ) -> Tuple[int, float, float]:
     """
     Seleciona um átomo pesado (C, N, O, S) usando critérios de distância e ângulo.
+    IGUAL ao escolher_cg do script original.
 
     Usa refinamento em 3 etapas:
     - REF1: Filtra por ângulo amplo [ang1_min, ang1_max]
     - REF2: Filtra por ângulo estreito [ang2_min, ang2_max]
     - REF3: Seleciona mais próximo do ângulo alvo
 
-    Se REF1 ou REF2 eliminam todos candidatos vindos de >=2, volta à lista anterior.
-
     Args:
         atoms: Lista de dicionários de átomos
         locked: Conjunto de índices de átomos bloqueados
         idx_center: Índice do átomo central (de onde mede distância)
-        idx_prev: Índice do átomo anterior (para medir ângulo)
+        idx_prev: Índice do átomo anterior (usado para ângulo se idx_angle_a/b não especificados)
         dmin: Distância mínima
         dmax: Distância máxima
         ang1_min, ang1_max: Limites REF1
         ang2_min, ang2_max: Limites REF2
         alvo_angulo: Ângulo alvo para REF3
-        delta: Incremento para expansão de janela
-        max_iter: Iterações máximas para expansão
         label: Rótulo para mensagens
+        idx_angle_a: Primeiro átomo para ângulo (default: idx_prev)
+        idx_angle_b: Segundo átomo (vértice) para ângulo (default: idx_center)
+                     Ângulo calculado: A-B-candidato
+        expand_distance: Se True, expande janela de distância se não encontrar candidatos (como CYS)
+        delta: Incremento para expansão de janela
+        max_iter: Máximo de iterações para expansão
 
     Returns:
         Tupla (índice do candidato escolhido, distância, ângulo)
     """
-    center = atoms[idx_center]
-    prev = atoms[idx_prev]
-    dmin_curr = dmin
-    dmax_curr = dmax
+    ref_dist = atoms[idx_center]
 
-    # Busca candidatos, expandindo janela se necessário
-    for _ in range(max_iter):
-        base = []
+    # Para o ângulo: usa idx_angle_a/b se especificados, senão usa idx_prev/idx_center
+    if idx_angle_a is None:
+        idx_angle_a = idx_prev
+    if idx_angle_b is None:
+        idx_angle_b = idx_center
+    ref_angle_a = atoms[idx_angle_a]
+    ref_angle_b = atoms[idx_angle_b]
+
+    # Busca candidatos por distância
+    dmin_cur = dmin
+    dmax_cur = dmax
+    candidatos = []
+
+    for iteration in range(max_iter if expand_distance else 1):
+        candidatos = []
         for i, a in enumerate(atoms):
             if i in locked or i == idx_center:
                 continue
-            d = dist(center, a)
-            if dmin_curr <= d <= dmax_curr:
-                ang = angle(prev, center, a)
-                base.append((i, d, ang))
-        if base:
+            d = dist(ref_dist, a)
+            if dmin_cur <= d <= dmax_cur:
+                ang = angle(ref_angle_a, ref_angle_b, a)
+                candidatos.append((i, d, ang))
+
+        if candidatos:
             break
-        dmin_curr = max(0.0, dmin_curr - delta)
-        dmax_curr += delta
 
-    if not base:
-        raise RuntimeError(f"Nenhum candidato encontrado para {label} em {dmin:.2f}-{dmax:.2f} Å.")
+        if expand_distance:
+            # Expande janela de distância
+            dmin_cur = max(0.0, dmin_cur - delta)
+            dmax_cur = dmax_cur + delta
 
-    if len(base) == 1:
-        return base[0]
+    if not candidatos:
+        raise RuntimeError(f"Nenhum candidato encontrado para {label} com CB em {dmin:.2f}-{dmax:.2f} Å.")
 
-    # REF1
-    prev_list = base
-    prev_count = len(prev_list)
-    ref1 = [(i, d, ang) for (i, d, ang) in prev_list if ang1_min <= ang <= ang1_max]
+    # Primeiro filtro angular amplo (REF1)
+    cand1 = [(i, d, ang) for (i, d, ang) in candidatos if ang1_min <= ang <= ang1_max]
 
-    if len(ref1) == 0 and prev_count >= 2:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
-        return ref3[0]
-    if len(ref1) == 1:
-        return ref1[0]
+    if len(cand1) == 1:
+        return cand1[0]
 
-    # REF2
-    if ref1:
-        prev_list = ref1
-        prev_count = len(prev_list)
-    ref2 = [(i, d, ang) for (i, d, ang) in prev_list if ang2_min <= ang <= ang2_max]
+    if len(cand1) > 1:
+        # Segundo filtro mais estreito (REF2)
+        cand2 = [(i, d, ang) for (i, d, ang) in cand1 if ang2_min <= ang <= ang2_max]
 
-    if len(ref2) == 0 and prev_count >= 2:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
-        return ref3[0]
-    if len(ref2) == 1:
-        return ref2[0]
+        if len(cand2) == 1:
+            return cand2[0]
 
-    # REF3
-    if ref2:
-        ref3 = sorted(ref2, key=lambda t: abs(t[2] - alvo_angulo))
-    else:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
+        if len(cand2) > 1:
+            # Escolhe angulo mais próximo de alvo_angulo (REF3)
+            cand2.sort(key=lambda t: abs(t[2] - alvo_angulo))
+            return cand2[0]
 
-    return ref3[0]
+        # Nenhum em cand2, escolhe de cand1 o mais próximo do alvo
+        cand1.sort(key=lambda t: abs(t[2] - alvo_angulo))
+        return cand1[0]
+
+    # Se cand1 ficou vazio, escolhe de todos os candidatos o mais próximo do alvo_angulo
+    candidatos.sort(key=lambda t: abs(t[2] - alvo_angulo))
+    return candidatos[0]
 
 
 # ==============================================================================
-# SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE
+# SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE (DFS COMPLETO)
 # ==============================================================================
+
+def find_all_backbone_paths(
+    atoms: List[Dict],
+    atom_by_serial: Dict[int, Dict],
+    backbone_ids: List[int],
+    coords: Dict[int, Tuple[float, float, float]],
+    max_steps: int = 23,
+    min_total: float = 30.0,
+    max_total: float = 40.0
+) -> Tuple[List[Dict], Dict]:
+    """
+    Explora todos os caminhos possíveis entre:
+      backbone_ids[0] (N 576) e backbone_ids[-1] (C 583)
+    seguindo a ordem canônica de backbone, mas permitindo que as
+    COORDENADAS venham de quaisquer átomos candidatos (via swap).
+
+    Cada estado tem:
+        * step: índice do último vértice canônico definido (0..23)
+        * coords: dict serial -> (x, y, z) para ESTE caminho
+        * locked: conjunto de seriais cuja coordenada já é vértice do backbone
+        * total: soma das distâncias entre vértices do backbone
+        * edges: lista de passos com metadados
+
+    Retorna:
+        - solutions: lista de estados finais válidos (23 passos, soma entre 30 e 40 Å)
+        - stats: dicionário com contagens
+    """
+    all_serials = [a['serial'] for a in atoms]
+
+    L = len(backbone_ids)
+    if L - 1 != max_steps:
+        raise ValueError(
+            f"Número de passos (backbone_ids - 1 = {L-1}) "
+            f"não bate com max_steps={max_steps}."
+        )
+
+    start_id = backbone_ids[0]
+
+    # Estatísticas
+    stats = {
+        "caminhos_estouraram_23_passos": 0,
+        "caminhos_passaram_40A_antes_23": 0,
+        "caminhos_chegaram_alvo_23_menor_30A": 0,
+        "caminhos_chegaram_alvo_23_entre_30e40A": 0,
+        "caminhos_mortos_sem_candidato": 0
+    }
+
+    # Soluções finais
+    solutions = []
+
+    # Estado inicial
+    inicial = {
+        "step": 0,                    # já estamos no vértice 0 (N 576)
+        "coords": coords.copy(),      # cópia das coordenadas iniciais
+        "locked": {start_id},         # N(576) já é vértice e nunca mais troca
+        "total": 0.0,
+        "edges": []                   # nenhum passo ainda
+    }
+
+    # DFS com pilha
+    stack = [inicial]
+
+    while stack:
+        state = stack.pop()
+        k = state["step"]
+        total = state["total"]
+
+        # Se já chegamos ao último vértice canônico (C 583)
+        if k == max_steps:
+            # Verifica faixa de distância total
+            if total < min_total:
+                stats["caminhos_chegaram_alvo_23_menor_30A"] += 1
+            elif total <= max_total:
+                stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
+                solutions.append(state)
+                # Retorna a primeira solução encontrada para eficiência
+                return solutions, stats
+            else:
+                stats["caminhos_passaram_40A_antes_23"] += 1
+            continue
+
+        # Ainda não completou backbone: expandimos
+        curr_id = backbone_ids[k]
+        next_id = backbone_ids[k + 1]
+
+        curr_atom = atom_by_serial[curr_id]
+        next_atom = atom_by_serial[next_id]
+
+        limits = bond_limits_backbone(curr_atom['name'], next_atom['name'])
+        if limits is None:
+            raise ValueError(
+                f"Par de backbone inesperado: {curr_atom['name']}-{next_atom['name']}"
+            )
+        d_min, d_max = limits
+
+        curr_coord = state["coords"][curr_id]
+
+        found_candidate = False
+
+        # Loop em TODOS os átomos como candidatos de coordenadas
+        for cand_id in all_serials:
+            # Não podemos usar um átomo cuja coordenada já é vértice fixo
+            if cand_id in state["locked"]:
+                continue
+
+            cand_coord = state["coords"][cand_id]
+            d = dist_tuple(curr_coord, cand_coord)
+
+            if d < d_min or d > d_max:
+                continue
+
+            # Candidato aceito: novo estado (novo caminho)
+            found_candidate = True
+
+            # Copia rasa da matriz de coordenadas (dict serial -> coord)
+            new_coords = state["coords"].copy()
+
+            # Swap de coordenadas entre next_id (vértice canônico do backbone)
+            # e o cand_id (átomo candidato), se forem diferentes
+            if cand_id != next_id:
+                tmp = new_coords[next_id]
+                new_coords[next_id] = new_coords[cand_id]
+                new_coords[cand_id] = tmp
+
+            new_total = total + d
+            new_step = k + 1
+
+            # Poda por comprimento > 40 Å antes de completar 23 passos
+            if new_total > max_total and new_step < max_steps:
+                stats["caminhos_passaram_40A_antes_23"] += 1
+                continue
+
+            # Atualiza conjunto de vértices fixos (backbone já definido)
+            new_locked = set(state["locked"])
+            new_locked.add(next_id)
+
+            # Acrescenta aresta ao histórico
+            new_edges = list(state["edges"])
+            new_edges.append({
+                "from": curr_id,
+                "to": next_id,
+                "donor": cand_id,
+                "distance": d
+            })
+
+            new_state = {
+                "step": new_step,
+                "coords": new_coords,
+                "locked": new_locked,
+                "total": new_total,
+                "edges": new_edges
+            }
+
+            stack.append(new_state)
+
+        # Se não houve nenhum candidato neste passo, o caminho morre aqui
+        if not found_candidate:
+            stats["caminhos_mortos_sem_candidato"] += 1
+
+    return solutions, stats
+
 
 def fase1_backbone(
     atoms: List[Dict],
@@ -803,7 +975,13 @@ def fase1_backbone(
     """
     FASE 1: Reconstrução do backbone N-CA-C.
 
-    Explora caminhos possíveis e encontra uma solução válida para o backbone.
+    Usa algoritmo DFS completo com backtracking para explorar todos os
+    caminhos possíveis e encontrar uma solução válida para o backbone.
+
+    Critérios de validação (igual ao script original):
+    - 23 passos (24 vértices: N-CA-C para 8 resíduos)
+    - Comprimento total entre 30 e 40 Angstroms
+    - Tolerâncias de ligação: N-CA (1.40-1.60), CA-C (1.40-1.70), C-N (1.25-1.45)
 
     Args:
         atoms: Lista de dicionários de átomos
@@ -827,63 +1005,44 @@ def fase1_backbone(
         print(f"Backbone canônico construído: {len(backbone_ids)} átomos")
         print(f"Resíduos: {backbone_ids[0]} (N) até {backbone_ids[-1]} (C)")
 
-    # Algoritmo de busca de caminho válido (DFS simplificado - pega primeiro válido)
-    all_serials = [a['serial'] for a in atoms]
-    max_steps = len(backbone_ids) - 1
+    max_steps = len(backbone_ids) - 1  # 23 passos para 24 átomos
 
-    # Estado inicial
-    start_id = backbone_ids[0]
-    locked = {start_id}
+    # Executa busca DFS completa
+    if verbose:
+        print("Iniciando busca DFS de caminhos válidos...")
 
-    # Processa cada passo do backbone
-    for k in range(max_steps):
-        curr_id = backbone_ids[k]
-        next_id = backbone_ids[k + 1]
-
-        curr_atom = atom_by_serial[curr_id]
-        next_atom = atom_by_serial[next_id]
-
-        limits = bond_limits_backbone(curr_atom['name'], next_atom['name'])
-        if limits is None:
-            raise ValueError(f"Par de backbone inesperado: {curr_atom['name']}-{next_atom['name']}")
-
-        d_min, d_max = limits
-        curr_coord = coords[curr_id]
-
-        # Busca melhor candidato
-        best_serial = None
-        best_dist = None
-
-        for cand_id in all_serials:
-            if cand_id in locked:
-                continue
-
-            cand_coord = coords[cand_id]
-            d = dist_tuple(curr_coord, cand_coord)
-
-            if d_min <= d <= d_max:
-                if best_dist is None or d < best_dist:
-                    best_dist = d
-                    best_serial = cand_id
-
-        if best_serial is None:
-            raise RuntimeError(f"Sem candidato para passo {k}: {curr_atom['name']} -> {next_atom['name']}")
-
-        # Swap de coordenadas se necessário
-        if best_serial != next_id:
-            tmp = coords[next_id]
-            coords[next_id] = coords[best_serial]
-            coords[best_serial] = tmp
-
-        locked.add(next_id)
-
-        if verbose and (k + 1) % 5 == 0:
-            print(f"  Passo {k+1}/{max_steps} concluído")
+    solutions, stats = find_all_backbone_paths(
+        atoms=atoms,
+        atom_by_serial=atom_by_serial,
+        backbone_ids=backbone_ids,
+        coords=coords,
+        max_steps=max_steps,
+        min_total=30.0,
+        max_total=40.0
+    )
 
     if verbose:
-        print(f"Backbone reconstruído com sucesso!")
+        print(f"\n===== ESTATÍSTICAS DA BUSCA =====")
+        print(f"Caminhos válidos encontrados: {stats['caminhos_chegaram_alvo_23_entre_30e40A']}")
+        print(f"Caminhos que passaram de 40Å antes de 23 passos: {stats['caminhos_passaram_40A_antes_23']}")
+        print(f"Caminhos que chegaram ao alvo com < 30Å: {stats['caminhos_chegaram_alvo_23_menor_30A']}")
+        print(f"Caminhos mortos por falta de candidato: {stats['caminhos_mortos_sem_candidato']}")
 
-    return coords, backbone_ids
+    if not solutions:
+        raise RuntimeError(
+            "Nenhum caminho válido encontrado para o backbone!\n"
+            f"Estatísticas: {stats}\n"
+            "Verifique se o arquivo PDB contém as coordenadas corretas."
+        )
+
+    # Usa a primeira solução encontrada
+    solution = solutions[0]
+
+    if verbose:
+        print(f"\nUsando caminho com distância total: {solution['total']:.3f} Å")
+        print("Backbone reconstruído com sucesso!")
+
+    return solution["coords"], backbone_ids
 
 
 # ==============================================================================
@@ -1048,7 +1207,7 @@ def fase3_ca_cb(
         N_coord = coords[N_id]
         C_coord = coords[C_id]
 
-        # Busca candidatos por distância
+        # Busca candidatos por distância (1.40-1.60 Å)
         candidates = []
         for s in all_serials:
             if s in locked:
@@ -1058,29 +1217,55 @@ def fase3_ca_cb(
             d = dist_tuple(CA_coord, cand_coord)
 
             if 1.40 <= d <= 1.60:
-                # Calcula ângulo N-CA-candidato
-                # Precisa converter coords para dict temporário
+                # Calcula AMBOS ângulos: N-CA-candidato E C-CA-candidato
                 ca_dict = {'x': CA_coord[0], 'y': CA_coord[1], 'z': CA_coord[2]}
                 n_dict = {'x': N_coord[0], 'y': N_coord[1], 'z': N_coord[2]}
+                c_dict = {'x': C_coord[0], 'y': C_coord[1], 'z': C_coord[2]}
                 cand_dict = {'x': cand_coord[0], 'y': cand_coord[1], 'z': cand_coord[2]}
 
                 theta_N = angle(n_dict, ca_dict, cand_dict)
-                candidates.append((s, d, theta_N))
+                theta_C = angle(c_dict, ca_dict, cand_dict)
+                candidates.append((s, d, theta_N, theta_C))
 
         if not candidates:
             continue
 
-        # Refinamento por ângulo
+        # Refinamento por ângulo (igual ao script original)
         if len(candidates) > 1:
-            # REF1: 104-116
-            filtered = [(s, d, t) for (s, d, t) in candidates if 104.0 <= t <= 116.0]
-            if filtered:
-                candidates = filtered
+            # Enriquece com cálculo de ângulos (já feito acima)
+            enriched = [(s, d, tN, tC) for (s, d, tN, tC) in candidates
+                        if tN is not None and tC is not None]
 
-            # REF3: mais próximo de 110
-            candidates.sort(key=lambda x: abs(x[2] - 110.0))
+            if not enriched:
+                # Fallback: usa só distância se ângulos degeneraram
+                candidates.sort(key=lambda x: x[1])
+                chosen_serial = candidates[0][0]
+            else:
+                # Filtra por janelas de ângulo:
+                # N-CA-CB: [104°, 116°]
+                # C-CA-CB: [105°, 118°]
+                filtered = [
+                    (s, d, tN, tC)
+                    for (s, d, tN, tC) in enriched
+                    if 104.0 <= tN <= 116.0 and 105.0 <= tC <= 118.0
+                ]
 
-        chosen_serial = candidates[0][0]
+                if filtered:
+                    working = filtered
+                else:
+                    # Se nenhum satisfaz as janelas, usa todos
+                    working = enriched
+
+                # Desempate: minimiza |θN - 110| + |θC - 111|
+                def score(item):
+                    _, _, tN, tC = item
+                    return abs(tN - 110.0) + abs(tC - 111.0)
+
+                working.sort(key=score)
+                chosen_serial = working[0][0]
+        else:
+            # Só um candidato
+            chosen_serial = candidates[0][0]
 
         # Swap se necessário
         if chosen_serial != CB_id:
@@ -1213,7 +1398,10 @@ def processar_ile(
     idx_CB = name2idx.get("CB")
     idx_CG1 = name2idx.get("CG1")
     idx_CG2 = name2idx.get("CG2")
-    idx_CD1 = name2idx.get("CD1")
+    # ILE usa "CD" (não CD1) no padrão PDB
+    idx_CD = name2idx.get("CD")
+    if idx_CD is None:
+        idx_CD = name2idx.get("CD1")  # fallback para nomenclatura alternativa
 
     # CB -> CG2
     if idx_CG2 is not None and idx_CB is not None and idx_CA is not None:
@@ -1258,10 +1446,10 @@ def processar_ile(
             if verbose:
                 print(f"    AVISO CG1: {e}")
 
-    # HG1 e CD1 (vizinhos de CG1)
+    # HG1 e CD (vizinhos de CG1) - igual ao original: 1HG1, 2HG1, CD
     idx_1HG1 = name2idx.get("1HG1")
     idx_2HG1 = name2idx.get("2HG1")
-    alvo_cg1 = [x for x in [idx_1HG1, idx_2HG1, idx_CD1] if x is not None]
+    alvo_cg1 = [x for x in [idx_1HG1, idx_2HG1, idx_CD] if x is not None]
     if alvo_cg1 and idx_CG1 is not None:
         atribuir_coord_alvos(
             atoms, locked, idx_CG1, alvo_cg1,
@@ -1269,13 +1457,11 @@ def processar_ile(
             target_count=len(alvo_cg1), label="CG1_viz"
         )
 
-    # HD (3 hidrogênios de CD1)
+    # HD (3 hidrogênios de CD) - igual ao original: HD1, HD2, HD3
     alvo_hd = [name2idx.get(n) for n in ("HD1", "HD2", "HD3") if name2idx.get(n) is not None]
-    if not alvo_hd:
-        alvo_hd = [name2idx.get(n) for n in ("1HD1", "2HD1", "3HD1") if name2idx.get(n) is not None]
-    if alvo_hd and idx_CD1 is not None:
+    if alvo_hd and idx_CD is not None:
         atribuir_coord_alvos(
-            atoms, locked, idx_CD1, alvo_hd,
+            atoms, locked, idx_CD, alvo_hd,
             dmin_init=0.990, dmax_init=1.150,
             target_count=len(alvo_hd), label="HD"
         )
@@ -1445,15 +1631,16 @@ def processar_leu(
             target_count=1, label="HG"
         )
 
-    # CG -> CD1
-    if idx_CD1 is not None and idx_CG is not None and idx_CB is not None:
+    # CG -> CD1 (distância CG-candidato, ângulo CA-CB-candidato como no original)
+    if idx_CD1 is not None and idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
                 atoms, locked, idx_CG, idx_CB,
                 dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0,
                 ang2_min=104.0, ang2_max=116.0,
-                alvo_angulo=110.0, label="CD1"
+                alvo_angulo=110.0, label="CD1",
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB  # ângulo CA-CB-candidato
             )
             if not same_coords(atoms[idx_CD1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD1], atoms[cand_idx])
@@ -1462,15 +1649,16 @@ def processar_leu(
             if verbose:
                 print(f"    AVISO CD1: {e}")
 
-    # CG -> CD2
-    if idx_CD2 is not None and idx_CG is not None and idx_CB is not None:
+    # CG -> CD2 (distância CG-candidato, ângulo CA-CB-candidato como no original)
+    if idx_CD2 is not None and idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
                 atoms, locked, idx_CG, idx_CB,
                 dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0,
                 ang2_min=104.0, ang2_max=116.0,
-                alvo_angulo=110.0, label="CD2"
+                alvo_angulo=110.0, label="CD2",
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB  # ângulo CA-CB-candidato
             )
             if not same_coords(atoms[idx_CD2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD2], atoms[cand_idx])
@@ -1753,7 +1941,7 @@ def processar_cys(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> SG (enxofre - distâncias maiores)
+    # CB -> SG (enxofre - distâncias maiores, com expansão de janela como no original)
     if idx_SG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1761,7 +1949,8 @@ def processar_cys(
                 dmin=1.60, dmax=1.90,
                 ang1_min=100.0, ang1_max=125.0,
                 ang2_min=104.0, ang2_max=121.0,
-                alvo_angulo=112.5, label="SG"
+                alvo_angulo=112.5, label="SG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_SG], atoms[cand_idx]):
                 swap_coords(atoms[idx_SG], atoms[cand_idx])
@@ -1823,7 +2012,7 @@ def processar_lys(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> CG
+    # CB -> CG (com expansão de janela como no original LYS)
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1831,7 +2020,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CG"
+                alvo_angulo=113.6, label="CG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
@@ -1851,7 +2041,7 @@ def processar_lys(
             target_count=len(alvo_hg), label="HG"
         )
 
-    # CG -> CD
+    # CG -> CD (com expansão de janela como no original LYS)
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1859,7 +2049,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CD"
+                alvo_angulo=113.6, label="CD",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
@@ -1879,7 +2070,7 @@ def processar_lys(
             target_count=len(alvo_hd), label="HD"
         )
 
-    # CD -> CE
+    # CD -> CE (com expansão de janela como no original LYS)
     if idx_CE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1887,7 +2078,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CE"
+                alvo_angulo=113.6, label="CE",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CE], atoms[cand_idx]):
                 swap_coords(atoms[idx_CE], atoms[cand_idx])
@@ -1907,7 +2099,7 @@ def processar_lys(
             target_count=len(alvo_he), label="HE"
         )
 
-    # CE -> NZ
+    # CE -> NZ (com expansão de janela como no original LYS)
     if idx_NZ is not None and idx_CE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1915,7 +2107,8 @@ def processar_lys(
                 dmin=1.38, dmax=1.58,
                 ang1_min=95.0, ang1_max=125.0,
                 ang2_min=100.0, ang2_max=120.0,
-                alvo_angulo=110.0, label="NZ"
+                alvo_angulo=110.0, label="NZ",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_NZ], atoms[cand_idx])
@@ -1983,7 +2176,7 @@ def processar_arg(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> CG
+    # CB -> CG (com expansão de janela como no original ARG)
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1991,7 +2184,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CG"
+                alvo_angulo=113.6, label="CG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
@@ -2011,7 +2205,7 @@ def processar_arg(
             target_count=len(alvo_hg), label="HG"
         )
 
-    # CG -> CD
+    # CG -> CD (com expansão de janela como no original ARG)
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2019,7 +2213,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CD"
+                alvo_angulo=113.6, label="CD",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
@@ -2039,7 +2234,7 @@ def processar_arg(
             target_count=len(alvo_hd), label="HD"
         )
 
-    # CD -> NE
+    # CD -> NE (com expansão de janela como no original ARG)
     if idx_NE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2047,7 +2242,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=103.0, ang1_max=133.0,
                 ang2_min=108.0, ang2_max=128.0,
-                alvo_angulo=118.0, label="NE"
+                alvo_angulo=118.0, label="NE",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NE], atoms[cand_idx]):
                 swap_coords(atoms[idx_NE], atoms[cand_idx])
@@ -2065,7 +2261,7 @@ def processar_arg(
             target_count=1, label="HE"
         )
 
-    # NE -> CZ (planar)
+    # NE -> CZ (planar, com expansão de janela como no original ARG)
     if idx_CZ is not None and idx_NE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2073,7 +2269,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="CZ"
+                alvo_angulo=120.0, label="CZ",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_CZ], atoms[cand_idx])
@@ -2082,7 +2279,7 @@ def processar_arg(
             if verbose:
                 print(f"    AVISO CZ: {e}")
 
-    # CZ -> NH1
+    # CZ -> NH1 (com expansão de janela como no original ARG)
     if idx_NH1 is not None and idx_CZ is not None and idx_NE is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2090,7 +2287,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="NH1"
+                alvo_angulo=120.0, label="NH1",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NH1], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH1], atoms[cand_idx])
@@ -2110,7 +2308,7 @@ def processar_arg(
             target_count=len(alvo_hh1), label="HH1"
         )
 
-    # CZ -> NH2
+    # CZ -> NH2 (com expansão de janela como no original ARG)
     if idx_NH2 is not None and idx_CZ is not None and idx_NE is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2118,7 +2316,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="NH2"
+                alvo_angulo=120.0, label="NH2",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NH2], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH2], atoms[cand_idx])
