@@ -700,93 +700,73 @@ def escolher_pesado_com_angulo(
     ang2_min: float = 104.0,
     ang2_max: float = 116.0,
     alvo_angulo: float = 110.0,
-    delta: float = 0.005,
-    max_iter: int = 200,
     label: str = "PESO"
 ) -> Tuple[int, float, float]:
     """
     Seleciona um átomo pesado (C, N, O, S) usando critérios de distância e ângulo.
+    IGUAL ao escolher_cg do script original.
 
     Usa refinamento em 3 etapas:
     - REF1: Filtra por ângulo amplo [ang1_min, ang1_max]
     - REF2: Filtra por ângulo estreito [ang2_min, ang2_max]
     - REF3: Seleciona mais próximo do ângulo alvo
 
-    Se REF1 ou REF2 eliminam todos candidatos vindos de >=2, volta à lista anterior.
-
     Args:
         atoms: Lista de dicionários de átomos
         locked: Conjunto de índices de átomos bloqueados
-        idx_center: Índice do átomo central (de onde mede distância)
-        idx_prev: Índice do átomo anterior (para medir ângulo)
+        idx_center: Índice do átomo central (CB - de onde mede distância)
+        idx_prev: Índice do átomo anterior (CA - para medir ângulo)
         dmin: Distância mínima
         dmax: Distância máxima
         ang1_min, ang1_max: Limites REF1
         ang2_min, ang2_max: Limites REF2
         alvo_angulo: Ângulo alvo para REF3
-        delta: Incremento para expansão de janela
-        max_iter: Iterações máximas para expansão
         label: Rótulo para mensagens
 
     Returns:
         Tupla (índice do candidato escolhido, distância, ângulo)
     """
-    center = atoms[idx_center]
-    prev = atoms[idx_prev]
-    dmin_curr = dmin
-    dmax_curr = dmax
+    ref_cb = atoms[idx_center]
+    ref_ca = atoms[idx_prev]
 
-    # Busca candidatos, expandindo janela se necessário
-    for _ in range(max_iter):
-        base = []
-        for i, a in enumerate(atoms):
-            if i in locked or i == idx_center:
-                continue
-            d = dist(center, a)
-            if dmin_curr <= d <= dmax_curr:
-                ang = angle(prev, center, a)
-                base.append((i, d, ang))
-        if base:
-            break
-        dmin_curr = max(0.0, dmin_curr - delta)
-        dmax_curr += delta
+    # Busca candidatos por distância (SEM expansão de janela - igual ao original)
+    candidatos = []
+    for i, a in enumerate(atoms):
+        if i in locked or i == idx_center:
+            continue
+        d = dist(ref_cb, a)
+        if dmin <= d <= dmax:
+            ang = angle(ref_ca, ref_cb, a)
+            candidatos.append((i, d, ang))
 
-    if not base:
-        raise RuntimeError(f"Nenhum candidato encontrado para {label} em {dmin:.2f}-{dmax:.2f} Å.")
+    if not candidatos:
+        raise RuntimeError(f"Nenhum candidato encontrado para {label} com CB em {dmin:.2f}-{dmax:.2f} Å.")
 
-    if len(base) == 1:
-        return base[0]
+    # Primeiro filtro angular amplo (REF1)
+    cand1 = [(i, d, ang) for (i, d, ang) in candidatos if ang1_min <= ang <= ang1_max]
 
-    # REF1
-    prev_list = base
-    prev_count = len(prev_list)
-    ref1 = [(i, d, ang) for (i, d, ang) in prev_list if ang1_min <= ang <= ang1_max]
+    if len(cand1) == 1:
+        return cand1[0]
 
-    if len(ref1) == 0 and prev_count >= 2:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
-        return ref3[0]
-    if len(ref1) == 1:
-        return ref1[0]
+    if len(cand1) > 1:
+        # Segundo filtro mais estreito (REF2)
+        cand2 = [(i, d, ang) for (i, d, ang) in cand1 if ang2_min <= ang <= ang2_max]
 
-    # REF2
-    if ref1:
-        prev_list = ref1
-        prev_count = len(prev_list)
-    ref2 = [(i, d, ang) for (i, d, ang) in prev_list if ang2_min <= ang <= ang2_max]
+        if len(cand2) == 1:
+            return cand2[0]
 
-    if len(ref2) == 0 and prev_count >= 2:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
-        return ref3[0]
-    if len(ref2) == 1:
-        return ref2[0]
+        if len(cand2) > 1:
+            # Escolhe angulo mais próximo de alvo_angulo (REF3)
+            cand2.sort(key=lambda t: abs(t[2] - alvo_angulo))
+            return cand2[0]
 
-    # REF3
-    if ref2:
-        ref3 = sorted(ref2, key=lambda t: abs(t[2] - alvo_angulo))
-    else:
-        ref3 = sorted(prev_list, key=lambda t: abs(t[2] - alvo_angulo))
+        # Nenhum em cand2, escolhe de cand1 o mais próximo do alvo
+        cand1.sort(key=lambda t: abs(t[2] - alvo_angulo))
+        return cand1[0]
 
-    return ref3[0]
+    # Se cand1 ficou vazio, escolhe de todos os candidatos o mais próximo do alvo_angulo
+    candidatos.sort(key=lambda t: abs(t[2] - alvo_angulo))
+    return candidatos[0]
 
 
 # ==============================================================================
@@ -1387,7 +1367,10 @@ def processar_ile(
     idx_CB = name2idx.get("CB")
     idx_CG1 = name2idx.get("CG1")
     idx_CG2 = name2idx.get("CG2")
-    idx_CD1 = name2idx.get("CD1")
+    # ILE usa "CD" (não CD1) no padrão PDB
+    idx_CD = name2idx.get("CD")
+    if idx_CD is None:
+        idx_CD = name2idx.get("CD1")  # fallback para nomenclatura alternativa
 
     # CB -> CG2
     if idx_CG2 is not None and idx_CB is not None and idx_CA is not None:
@@ -1432,10 +1415,10 @@ def processar_ile(
             if verbose:
                 print(f"    AVISO CG1: {e}")
 
-    # HG1 e CD1 (vizinhos de CG1)
+    # HG1 e CD (vizinhos de CG1) - igual ao original: 1HG1, 2HG1, CD
     idx_1HG1 = name2idx.get("1HG1")
     idx_2HG1 = name2idx.get("2HG1")
-    alvo_cg1 = [x for x in [idx_1HG1, idx_2HG1, idx_CD1] if x is not None]
+    alvo_cg1 = [x for x in [idx_1HG1, idx_2HG1, idx_CD] if x is not None]
     if alvo_cg1 and idx_CG1 is not None:
         atribuir_coord_alvos(
             atoms, locked, idx_CG1, alvo_cg1,
@@ -1443,13 +1426,11 @@ def processar_ile(
             target_count=len(alvo_cg1), label="CG1_viz"
         )
 
-    # HD (3 hidrogênios de CD1)
+    # HD (3 hidrogênios de CD) - igual ao original: HD1, HD2, HD3
     alvo_hd = [name2idx.get(n) for n in ("HD1", "HD2", "HD3") if name2idx.get(n) is not None]
-    if not alvo_hd:
-        alvo_hd = [name2idx.get(n) for n in ("1HD1", "2HD1", "3HD1") if name2idx.get(n) is not None]
-    if alvo_hd and idx_CD1 is not None:
+    if alvo_hd and idx_CD is not None:
         atribuir_coord_alvos(
-            atoms, locked, idx_CD1, alvo_hd,
+            atoms, locked, idx_CD, alvo_hd,
             dmin_init=0.990, dmax_init=1.150,
             target_count=len(alvo_hd), label="HD"
         )
