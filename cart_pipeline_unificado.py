@@ -790,8 +790,169 @@ def escolher_pesado_com_angulo(
 
 
 # ==============================================================================
-# SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE
+# SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE (DFS COMPLETO)
 # ==============================================================================
+
+def find_all_backbone_paths(
+    atoms: List[Dict],
+    atom_by_serial: Dict[int, Dict],
+    backbone_ids: List[int],
+    coords: Dict[int, Tuple[float, float, float]],
+    max_steps: int = 23,
+    min_total: float = 30.0,
+    max_total: float = 40.0
+) -> Tuple[List[Dict], Dict]:
+    """
+    Explora todos os caminhos possíveis entre:
+      backbone_ids[0] (N 576) e backbone_ids[-1] (C 583)
+    seguindo a ordem canônica de backbone, mas permitindo que as
+    COORDENADAS venham de quaisquer átomos candidatos (via swap).
+
+    Cada estado tem:
+        * step: índice do último vértice canônico definido (0..23)
+        * coords: dict serial -> (x, y, z) para ESTE caminho
+        * locked: conjunto de seriais cuja coordenada já é vértice do backbone
+        * total: soma das distâncias entre vértices do backbone
+        * edges: lista de passos com metadados
+
+    Retorna:
+        - solutions: lista de estados finais válidos (23 passos, soma entre 30 e 40 Å)
+        - stats: dicionário com contagens
+    """
+    all_serials = [a['serial'] for a in atoms]
+
+    L = len(backbone_ids)
+    if L - 1 != max_steps:
+        raise ValueError(
+            f"Número de passos (backbone_ids - 1 = {L-1}) "
+            f"não bate com max_steps={max_steps}."
+        )
+
+    start_id = backbone_ids[0]
+
+    # Estatísticas
+    stats = {
+        "caminhos_estouraram_23_passos": 0,
+        "caminhos_passaram_40A_antes_23": 0,
+        "caminhos_chegaram_alvo_23_menor_30A": 0,
+        "caminhos_chegaram_alvo_23_entre_30e40A": 0,
+        "caminhos_mortos_sem_candidato": 0
+    }
+
+    # Soluções finais
+    solutions = []
+
+    # Estado inicial
+    inicial = {
+        "step": 0,                    # já estamos no vértice 0 (N 576)
+        "coords": coords.copy(),      # cópia das coordenadas iniciais
+        "locked": {start_id},         # N(576) já é vértice e nunca mais troca
+        "total": 0.0,
+        "edges": []                   # nenhum passo ainda
+    }
+
+    # DFS com pilha
+    stack = [inicial]
+
+    while stack:
+        state = stack.pop()
+        k = state["step"]
+        total = state["total"]
+
+        # Se já chegamos ao último vértice canônico (C 583)
+        if k == max_steps:
+            # Verifica faixa de distância total
+            if total < min_total:
+                stats["caminhos_chegaram_alvo_23_menor_30A"] += 1
+            elif total <= max_total:
+                stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
+                solutions.append(state)
+                # Retorna a primeira solução encontrada para eficiência
+                return solutions, stats
+            else:
+                stats["caminhos_passaram_40A_antes_23"] += 1
+            continue
+
+        # Ainda não completou backbone: expandimos
+        curr_id = backbone_ids[k]
+        next_id = backbone_ids[k + 1]
+
+        curr_atom = atom_by_serial[curr_id]
+        next_atom = atom_by_serial[next_id]
+
+        limits = bond_limits_backbone(curr_atom['name'], next_atom['name'])
+        if limits is None:
+            raise ValueError(
+                f"Par de backbone inesperado: {curr_atom['name']}-{next_atom['name']}"
+            )
+        d_min, d_max = limits
+
+        curr_coord = state["coords"][curr_id]
+
+        found_candidate = False
+
+        # Loop em TODOS os átomos como candidatos de coordenadas
+        for cand_id in all_serials:
+            # Não podemos usar um átomo cuja coordenada já é vértice fixo
+            if cand_id in state["locked"]:
+                continue
+
+            cand_coord = state["coords"][cand_id]
+            d = dist_tuple(curr_coord, cand_coord)
+
+            if d < d_min or d > d_max:
+                continue
+
+            # Candidato aceito: novo estado (novo caminho)
+            found_candidate = True
+
+            # Copia rasa da matriz de coordenadas (dict serial -> coord)
+            new_coords = state["coords"].copy()
+
+            # Swap de coordenadas entre next_id (vértice canônico do backbone)
+            # e o cand_id (átomo candidato), se forem diferentes
+            if cand_id != next_id:
+                tmp = new_coords[next_id]
+                new_coords[next_id] = new_coords[cand_id]
+                new_coords[cand_id] = tmp
+
+            new_total = total + d
+            new_step = k + 1
+
+            # Poda por comprimento > 40 Å antes de completar 23 passos
+            if new_total > max_total and new_step < max_steps:
+                stats["caminhos_passaram_40A_antes_23"] += 1
+                continue
+
+            # Atualiza conjunto de vértices fixos (backbone já definido)
+            new_locked = set(state["locked"])
+            new_locked.add(next_id)
+
+            # Acrescenta aresta ao histórico
+            new_edges = list(state["edges"])
+            new_edges.append({
+                "from": curr_id,
+                "to": next_id,
+                "donor": cand_id,
+                "distance": d
+            })
+
+            new_state = {
+                "step": new_step,
+                "coords": new_coords,
+                "locked": new_locked,
+                "total": new_total,
+                "edges": new_edges
+            }
+
+            stack.append(new_state)
+
+        # Se não houve nenhum candidato neste passo, o caminho morre aqui
+        if not found_candidate:
+            stats["caminhos_mortos_sem_candidato"] += 1
+
+    return solutions, stats
+
 
 def fase1_backbone(
     atoms: List[Dict],
@@ -803,7 +964,13 @@ def fase1_backbone(
     """
     FASE 1: Reconstrução do backbone N-CA-C.
 
-    Explora caminhos possíveis e encontra uma solução válida para o backbone.
+    Usa algoritmo DFS completo com backtracking para explorar todos os
+    caminhos possíveis e encontrar uma solução válida para o backbone.
+
+    Critérios de validação (igual ao script original):
+    - 23 passos (24 vértices: N-CA-C para 8 resíduos)
+    - Comprimento total entre 30 e 40 Angstroms
+    - Tolerâncias de ligação: N-CA (1.40-1.60), CA-C (1.40-1.70), C-N (1.25-1.45)
 
     Args:
         atoms: Lista de dicionários de átomos
@@ -827,63 +994,44 @@ def fase1_backbone(
         print(f"Backbone canônico construído: {len(backbone_ids)} átomos")
         print(f"Resíduos: {backbone_ids[0]} (N) até {backbone_ids[-1]} (C)")
 
-    # Algoritmo de busca de caminho válido (DFS simplificado - pega primeiro válido)
-    all_serials = [a['serial'] for a in atoms]
-    max_steps = len(backbone_ids) - 1
+    max_steps = len(backbone_ids) - 1  # 23 passos para 24 átomos
 
-    # Estado inicial
-    start_id = backbone_ids[0]
-    locked = {start_id}
+    # Executa busca DFS completa
+    if verbose:
+        print("Iniciando busca DFS de caminhos válidos...")
 
-    # Processa cada passo do backbone
-    for k in range(max_steps):
-        curr_id = backbone_ids[k]
-        next_id = backbone_ids[k + 1]
-
-        curr_atom = atom_by_serial[curr_id]
-        next_atom = atom_by_serial[next_id]
-
-        limits = bond_limits_backbone(curr_atom['name'], next_atom['name'])
-        if limits is None:
-            raise ValueError(f"Par de backbone inesperado: {curr_atom['name']}-{next_atom['name']}")
-
-        d_min, d_max = limits
-        curr_coord = coords[curr_id]
-
-        # Busca melhor candidato
-        best_serial = None
-        best_dist = None
-
-        for cand_id in all_serials:
-            if cand_id in locked:
-                continue
-
-            cand_coord = coords[cand_id]
-            d = dist_tuple(curr_coord, cand_coord)
-
-            if d_min <= d <= d_max:
-                if best_dist is None or d < best_dist:
-                    best_dist = d
-                    best_serial = cand_id
-
-        if best_serial is None:
-            raise RuntimeError(f"Sem candidato para passo {k}: {curr_atom['name']} -> {next_atom['name']}")
-
-        # Swap de coordenadas se necessário
-        if best_serial != next_id:
-            tmp = coords[next_id]
-            coords[next_id] = coords[best_serial]
-            coords[best_serial] = tmp
-
-        locked.add(next_id)
-
-        if verbose and (k + 1) % 5 == 0:
-            print(f"  Passo {k+1}/{max_steps} concluído")
+    solutions, stats = find_all_backbone_paths(
+        atoms=atoms,
+        atom_by_serial=atom_by_serial,
+        backbone_ids=backbone_ids,
+        coords=coords,
+        max_steps=max_steps,
+        min_total=30.0,
+        max_total=40.0
+    )
 
     if verbose:
-        print(f"Backbone reconstruído com sucesso!")
+        print(f"\n===== ESTATÍSTICAS DA BUSCA =====")
+        print(f"Caminhos válidos encontrados: {stats['caminhos_chegaram_alvo_23_entre_30e40A']}")
+        print(f"Caminhos que passaram de 40Å antes de 23 passos: {stats['caminhos_passaram_40A_antes_23']}")
+        print(f"Caminhos que chegaram ao alvo com < 30Å: {stats['caminhos_chegaram_alvo_23_menor_30A']}")
+        print(f"Caminhos mortos por falta de candidato: {stats['caminhos_mortos_sem_candidato']}")
 
-    return coords, backbone_ids
+    if not solutions:
+        raise RuntimeError(
+            "Nenhum caminho válido encontrado para o backbone!\n"
+            f"Estatísticas: {stats}\n"
+            "Verifique se o arquivo PDB contém as coordenadas corretas."
+        )
+
+    # Usa a primeira solução encontrada
+    solution = solutions[0]
+
+    if verbose:
+        print(f"\nUsando caminho com distância total: {solution['total']:.3f} Å")
+        print("Backbone reconstruído com sucesso!")
+
+    return solution["coords"], backbone_ids
 
 
 # ==============================================================================
