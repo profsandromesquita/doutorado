@@ -700,7 +700,12 @@ def escolher_pesado_com_angulo(
     ang2_min: float = 104.0,
     ang2_max: float = 116.0,
     alvo_angulo: float = 110.0,
-    label: str = "PESO"
+    label: str = "PESO",
+    idx_angle_a: int = None,
+    idx_angle_b: int = None,
+    expand_distance: bool = False,
+    delta: float = 0.005,
+    max_iter: int = 200
 ) -> Tuple[int, float, float]:
     """
     Seleciona um átomo pesado (C, N, O, S) usando critérios de distância e ângulo.
@@ -714,30 +719,56 @@ def escolher_pesado_com_angulo(
     Args:
         atoms: Lista de dicionários de átomos
         locked: Conjunto de índices de átomos bloqueados
-        idx_center: Índice do átomo central (CB - de onde mede distância)
-        idx_prev: Índice do átomo anterior (CA - para medir ângulo)
+        idx_center: Índice do átomo central (de onde mede distância)
+        idx_prev: Índice do átomo anterior (usado para ângulo se idx_angle_a/b não especificados)
         dmin: Distância mínima
         dmax: Distância máxima
         ang1_min, ang1_max: Limites REF1
         ang2_min, ang2_max: Limites REF2
         alvo_angulo: Ângulo alvo para REF3
         label: Rótulo para mensagens
+        idx_angle_a: Primeiro átomo para ângulo (default: idx_prev)
+        idx_angle_b: Segundo átomo (vértice) para ângulo (default: idx_center)
+                     Ângulo calculado: A-B-candidato
+        expand_distance: Se True, expande janela de distância se não encontrar candidatos (como CYS)
+        delta: Incremento para expansão de janela
+        max_iter: Máximo de iterações para expansão
 
     Returns:
         Tupla (índice do candidato escolhido, distância, ângulo)
     """
-    ref_cb = atoms[idx_center]
-    ref_ca = atoms[idx_prev]
+    ref_dist = atoms[idx_center]
 
-    # Busca candidatos por distância (SEM expansão de janela - igual ao original)
+    # Para o ângulo: usa idx_angle_a/b se especificados, senão usa idx_prev/idx_center
+    if idx_angle_a is None:
+        idx_angle_a = idx_prev
+    if idx_angle_b is None:
+        idx_angle_b = idx_center
+    ref_angle_a = atoms[idx_angle_a]
+    ref_angle_b = atoms[idx_angle_b]
+
+    # Busca candidatos por distância
+    dmin_cur = dmin
+    dmax_cur = dmax
     candidatos = []
-    for i, a in enumerate(atoms):
-        if i in locked or i == idx_center:
-            continue
-        d = dist(ref_cb, a)
-        if dmin <= d <= dmax:
-            ang = angle(ref_ca, ref_cb, a)
-            candidatos.append((i, d, ang))
+
+    for iteration in range(max_iter if expand_distance else 1):
+        candidatos = []
+        for i, a in enumerate(atoms):
+            if i in locked or i == idx_center:
+                continue
+            d = dist(ref_dist, a)
+            if dmin_cur <= d <= dmax_cur:
+                ang = angle(ref_angle_a, ref_angle_b, a)
+                candidatos.append((i, d, ang))
+
+        if candidatos:
+            break
+
+        if expand_distance:
+            # Expande janela de distância
+            dmin_cur = max(0.0, dmin_cur - delta)
+            dmax_cur = dmax_cur + delta
 
     if not candidatos:
         raise RuntimeError(f"Nenhum candidato encontrado para {label} com CB em {dmin:.2f}-{dmax:.2f} Å.")
@@ -1600,15 +1631,16 @@ def processar_leu(
             target_count=1, label="HG"
         )
 
-    # CG -> CD1
-    if idx_CD1 is not None and idx_CG is not None and idx_CB is not None:
+    # CG -> CD1 (distância CG-candidato, ângulo CA-CB-candidato como no original)
+    if idx_CD1 is not None and idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
                 atoms, locked, idx_CG, idx_CB,
                 dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0,
                 ang2_min=104.0, ang2_max=116.0,
-                alvo_angulo=110.0, label="CD1"
+                alvo_angulo=110.0, label="CD1",
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB  # ângulo CA-CB-candidato
             )
             if not same_coords(atoms[idx_CD1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD1], atoms[cand_idx])
@@ -1617,15 +1649,16 @@ def processar_leu(
             if verbose:
                 print(f"    AVISO CD1: {e}")
 
-    # CG -> CD2
-    if idx_CD2 is not None and idx_CG is not None and idx_CB is not None:
+    # CG -> CD2 (distância CG-candidato, ângulo CA-CB-candidato como no original)
+    if idx_CD2 is not None and idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
                 atoms, locked, idx_CG, idx_CB,
                 dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0,
                 ang2_min=104.0, ang2_max=116.0,
-                alvo_angulo=110.0, label="CD2"
+                alvo_angulo=110.0, label="CD2",
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB  # ângulo CA-CB-candidato
             )
             if not same_coords(atoms[idx_CD2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD2], atoms[cand_idx])
@@ -1908,7 +1941,7 @@ def processar_cys(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> SG (enxofre - distâncias maiores)
+    # CB -> SG (enxofre - distâncias maiores, com expansão de janela como no original)
     if idx_SG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1916,7 +1949,8 @@ def processar_cys(
                 dmin=1.60, dmax=1.90,
                 ang1_min=100.0, ang1_max=125.0,
                 ang2_min=104.0, ang2_max=121.0,
-                alvo_angulo=112.5, label="SG"
+                alvo_angulo=112.5, label="SG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_SG], atoms[cand_idx]):
                 swap_coords(atoms[idx_SG], atoms[cand_idx])
@@ -1978,7 +2012,7 @@ def processar_lys(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> CG
+    # CB -> CG (com expansão de janela como no original LYS)
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -1986,7 +2020,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CG"
+                alvo_angulo=113.6, label="CG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
@@ -2006,7 +2041,7 @@ def processar_lys(
             target_count=len(alvo_hg), label="HG"
         )
 
-    # CG -> CD
+    # CG -> CD (com expansão de janela como no original LYS)
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2014,7 +2049,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CD"
+                alvo_angulo=113.6, label="CD",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
@@ -2034,7 +2070,7 @@ def processar_lys(
             target_count=len(alvo_hd), label="HD"
         )
 
-    # CD -> CE
+    # CD -> CE (com expansão de janela como no original LYS)
     if idx_CE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2042,7 +2078,8 @@ def processar_lys(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CE"
+                alvo_angulo=113.6, label="CE",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CE], atoms[cand_idx]):
                 swap_coords(atoms[idx_CE], atoms[cand_idx])
@@ -2062,7 +2099,7 @@ def processar_lys(
             target_count=len(alvo_he), label="HE"
         )
 
-    # CE -> NZ
+    # CE -> NZ (com expansão de janela como no original LYS)
     if idx_NZ is not None and idx_CE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2070,7 +2107,8 @@ def processar_lys(
                 dmin=1.38, dmax=1.58,
                 ang1_min=95.0, ang1_max=125.0,
                 ang2_min=100.0, ang2_max=120.0,
-                alvo_angulo=110.0, label="NZ"
+                alvo_angulo=110.0, label="NZ",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_NZ], atoms[cand_idx])
@@ -2138,7 +2176,7 @@ def processar_arg(
             target_count=len(alvo_hb), label="HB"
         )
 
-    # CB -> CG
+    # CB -> CG (com expansão de janela como no original ARG)
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2146,7 +2184,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CG"
+                alvo_angulo=113.6, label="CG",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
@@ -2166,7 +2205,7 @@ def processar_arg(
             target_count=len(alvo_hg), label="HG"
         )
 
-    # CG -> CD
+    # CG -> CD (com expansão de janela como no original ARG)
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2174,7 +2213,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0,
                 ang2_min=103.0, ang2_max=124.0,
-                alvo_angulo=113.6, label="CD"
+                alvo_angulo=113.6, label="CD",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
@@ -2194,7 +2234,7 @@ def processar_arg(
             target_count=len(alvo_hd), label="HD"
         )
 
-    # CD -> NE
+    # CD -> NE (com expansão de janela como no original ARG)
     if idx_NE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2202,7 +2242,8 @@ def processar_arg(
                 dmin=1.40, dmax=1.60,
                 ang1_min=103.0, ang1_max=133.0,
                 ang2_min=108.0, ang2_max=128.0,
-                alvo_angulo=118.0, label="NE"
+                alvo_angulo=118.0, label="NE",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NE], atoms[cand_idx]):
                 swap_coords(atoms[idx_NE], atoms[cand_idx])
@@ -2220,7 +2261,7 @@ def processar_arg(
             target_count=1, label="HE"
         )
 
-    # NE -> CZ (planar)
+    # NE -> CZ (planar, com expansão de janela como no original ARG)
     if idx_CZ is not None and idx_NE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2228,7 +2269,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="CZ"
+                alvo_angulo=120.0, label="CZ",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_CZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_CZ], atoms[cand_idx])
@@ -2237,7 +2279,7 @@ def processar_arg(
             if verbose:
                 print(f"    AVISO CZ: {e}")
 
-    # CZ -> NH1
+    # CZ -> NH1 (com expansão de janela como no original ARG)
     if idx_NH1 is not None and idx_CZ is not None and idx_NE is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2245,7 +2287,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="NH1"
+                alvo_angulo=120.0, label="NH1",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NH1], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH1], atoms[cand_idx])
@@ -2265,7 +2308,7 @@ def processar_arg(
             target_count=len(alvo_hh1), label="HH1"
         )
 
-    # CZ -> NH2
+    # CZ -> NH2 (com expansão de janela como no original ARG)
     if idx_NH2 is not None and idx_CZ is not None and idx_NE is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(
@@ -2273,7 +2316,8 @@ def processar_arg(
                 dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0,
                 ang2_min=114.0, ang2_max=126.0,
-                alvo_angulo=120.0, label="NH2"
+                alvo_angulo=120.0, label="NH2",
+                expand_distance=True, delta=0.005, max_iter=200
             )
             if not same_coords(atoms[idx_NH2], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH2], atoms[cand_idx])
