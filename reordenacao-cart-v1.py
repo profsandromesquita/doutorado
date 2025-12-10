@@ -1182,17 +1182,23 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
 # ==============================================================================
 
 def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641,
-                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> str:
+                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> Tuple[str, bool, str]:
     """
     Processa um único frame da trajetória.
-    Retorna o conteúdo do frame processado.
+
+    Retorna:
+        Tupla (conteúdo_processado, sucesso, mensagem_erro)
+        - conteúdo_processado: String com frame (processado ou original se falhou)
+        - sucesso: True se processou sem erros, False caso contrário
+        - mensagem_erro: Descrição do erro (vazia se sucesso)
     """
     atoms, lines = parse_frame_content(frame_content)
 
     if not atoms:
-        return frame_content  # Frame vazio ou inválido
+        return frame_content, False, "Frame vazio ou sem átomos válidos"
 
     coords = extrair_coords_de_atoms(atoms)
+    erro_msg = ""
 
     try:
         # FASE 1: Backbone
@@ -1243,14 +1249,14 @@ def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641
 
         # Atualizar linhas
         lines = update_pdb_lines(lines, atoms)
+        return "\n".join(lines), True, ""
 
     except Exception as e:
+        erro_msg = str(e)
         if verbose:
-            print(f"  AVISO Frame {frame_num}: {e}")
+            print(f"  AVISO Frame {frame_num}: {erro_msg}")
         # Retorna frame original em caso de erro
-        pass
-
-    return "\n".join(lines)
+        return "\n".join(lines), False, erro_msg
 
 
 # ==============================================================================
@@ -1284,24 +1290,47 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
 
     # Processar cada frame
     processed_frames = []
+    frames_com_falha = []  # Lista de tuplas (numero_frame, mensagem_erro)
+    frames_sucesso = 0
 
     for i, frame_content in enumerate(frames):
         frame_num = i + 1
         if verbose:
             print(f"\rProcessando frame {frame_num}/{total_frames}...", end="", flush=True)
 
-        processed_frame = processar_frame(
+        processed_frame, sucesso, erro_msg = processar_frame(
             frame_content, frame_num, start_serial, end_serial, chain, verbose=False
         )
         processed_frames.append(processed_frame)
 
-    print(f"\rProcessados {total_frames} frames com sucesso!          ")
+        if sucesso:
+            frames_sucesso += 1
+        else:
+            frames_com_falha.append((frame_num, erro_msg))
+
+    print(f"\rProcessamento concluído!                                    ")
 
     # Escrever arquivo de saída
     with open(pdb_saida, 'w') as f:
         f.write("\n".join(processed_frames))
 
-    print(f"\nArquivo de saída: {pdb_saida}")
+    # Relatório final
+    print("\n" + "="*80)
+    print("RELATÓRIO DE PROCESSAMENTO")
+    print("="*80)
+    print(f"Total de frames:      {total_frames}")
+    print(f"Frames com sucesso:   {frames_sucesso}")
+    print(f"Frames com falha:     {len(frames_com_falha)}")
+
+    if frames_com_falha:
+        print("\n" + "-"*80)
+        print("FRAMES COM FALHA (mantidos com coordenadas originais):")
+        print("-"*80)
+        for frame_num, erro in frames_com_falha:
+            print(f"  Frame {frame_num}: {erro}")
+
+    print("\n" + "="*80)
+    print(f"Arquivo de saída: {pdb_saida}")
     print("="*80)
     print("PIPELINE CONCLUÍDO!")
     print("="*80)

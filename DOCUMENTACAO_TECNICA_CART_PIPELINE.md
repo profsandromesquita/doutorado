@@ -498,19 +498,42 @@ Função principal que processa toda a trajetória.
 | Nenhum frame detectado | "Nenhum frame encontrado" |
 | Backbone impossível | "Nenhum caminho válido encontrado" |
 
-### 9.3 Logging
+### 9.3 Relatório de Falhas
 
-O pipeline usa `print()` para feedback:
+Ao final do processamento, o sistema exibe um relatório completo:
+
+```
+================================================================================
+RELATÓRIO DE PROCESSAMENTO
+================================================================================
+Total de frames:      1000
+Frames com sucesso:   997
+Frames com falha:     3
+
+--------------------------------------------------------------------------------
+FRAMES COM FALHA (mantidos com coordenadas originais):
+--------------------------------------------------------------------------------
+  Frame 42: Nenhum caminho válido encontrado para o backbone
+  Frame 156: Nenhum candidato encontrado para CG
+  Frame 891: Frame vazio ou sem átomos válidos
+
+================================================================================
+Arquivo de saída: trajetoria_reordenada.pdb
+================================================================================
+PIPELINE CONCLUÍDO!
+================================================================================
+```
+
+### 9.4 Logging de Progresso
+
+O pipeline usa `print()` para feedback em tempo real:
 
 ```python
-# Progresso normal
+# Progresso durante processamento
 "Processando frame 50/1000..."
 
-# Avisos (verbose=True)
-"AVISO Frame 42: Nenhum candidato encontrado para CG"
-
 # Conclusão
-"Processados 1000 frames com sucesso!"
+"Processamento concluído!"
 ```
 
 ---
