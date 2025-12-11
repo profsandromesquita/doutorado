@@ -607,19 +607,40 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
             delta=delta
         )
 
-        # Registrar expansão se ocorreu
-        if num_expansoes > 0:
-            stats["expansoes_janela"].append({
-                "passo": k,
-                "atomo_atual": f"{curr_atom['name']} ({curr_id})",
-                "atomo_proximo": f"{next_atom['name']} ({next_id})",
-                "janela_original": f"{d_min_base:.3f}-{d_max_base:.3f}",
-                "janela_expandida": f"{d_min_final:.3f}-{d_max_final:.3f}",
-                "expansoes": num_expansoes
-            })
-
         # Selecionar o melhor candidato (primeiro da lista ordenada)
         best_cand_id, best_dist = candidatos[0]
+
+        # Registrar expansão se ocorreu
+        if num_expansoes > 0:
+            # Encontrar informações do candidato selecionado
+            cand_atom = atom_by_serial.get(best_cand_id, {})
+            stats["expansoes_janela"].append({
+                "passo": k + 1,  # Passo 1-based para relatório
+                "passo_total": max_steps,
+                "atomo_atual": {
+                    "serial": curr_id,
+                    "nome": curr_atom['name'],
+                    "residuo": curr_atom['resname'],
+                    "res_seq": curr_atom['resseq']
+                },
+                "atomo_proximo": {
+                    "serial": next_id,
+                    "nome": next_atom['name'],
+                    "residuo": next_atom['resname'],
+                    "res_seq": next_atom['resseq']
+                },
+                "janela_original": {"min": d_min_base, "max": d_max_base},
+                "janela_expandida": {"min": d_min_final, "max": d_max_final},
+                "expansoes": num_expansoes,
+                "candidato_encontrado": {
+                    "serial": best_cand_id,
+                    "nome": cand_atom.get('name', '?'),
+                    "residuo": cand_atom.get('resname', '?'),
+                    "res_seq": cand_atom.get('resseq', '?'),
+                    "distancia": best_dist
+                },
+                "houve_troca": best_cand_id != next_id
+            })
 
         # Fazer a troca de coordenadas se necessário
         if best_cand_id != next_id:
@@ -658,8 +679,81 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     return [solution], stats
 
 
+def formatar_relatorio_expansoes(expansoes: List[Dict], frame_num: int = None) -> str:
+    """
+    Formata um relatório detalhado de todas as expansões de janela realizadas.
+
+    Args:
+        expansoes: Lista de dicionários com informações de cada expansão
+        frame_num: Número do frame (opcional, para relatórios multi-frame)
+
+    Returns:
+        String formatada com o relatório completo
+    """
+    if not expansoes:
+        return ""
+
+    lines = []
+    lines.append("=" * 90)
+    if frame_num is not None:
+        lines.append(f"RELATÓRIO DE EXPANSÕES DE JANELA - FRAME {frame_num}")
+    else:
+        lines.append("RELATÓRIO DE EXPANSÕES DE JANELA DO BACKBONE")
+    lines.append("=" * 90)
+    lines.append(f"\nTotal de átomos que necessitaram expansão: {len(expansoes)}")
+    lines.append("")
+
+    for i, exp in enumerate(expansoes, 1):
+        lines.append("-" * 90)
+        lines.append(f"EXPANSÃO #{i}")
+        lines.append("-" * 90)
+
+        # Informações do passo
+        lines.append(f"Passo: {exp['passo']}/{exp['passo_total']}")
+
+        # Átomo atual
+        curr = exp['atomo_atual']
+        lines.append(f"\nÁtomo atual:     {curr['nome']:4s} (serial {curr['serial']}) - {curr['residuo']} {curr['res_seq']}")
+
+        # Átomo próximo esperado
+        prox = exp['atomo_proximo']
+        lines.append(f"Próximo esperado: {prox['nome']:4s} (serial {prox['serial']}) - {prox['residuo']} {prox['res_seq']}")
+
+        # Janela de distância
+        jan_orig = exp['janela_original']
+        jan_exp = exp['janela_expandida']
+        lines.append(f"\nJanela original:  {jan_orig['min']:.3f} - {jan_orig['max']:.3f} Å")
+        lines.append(f"Janela expandida: {jan_exp['min']:.3f} - {jan_exp['max']:.3f} Å")
+        lines.append(f"Expansões necessárias: {exp['expansoes']} (delta: ±{exp['expansoes'] * 0.01:.2f} Å)")
+
+        # Candidato encontrado
+        cand = exp['candidato_encontrado']
+        lines.append(f"\nCandidato encontrado:")
+        lines.append(f"  Serial: {cand['serial']}")
+        lines.append(f"  Nome: {cand['nome']}")
+        lines.append(f"  Resíduo: {cand['residuo']} {cand['res_seq']}")
+        lines.append(f"  Distância: {cand['distancia']:.4f} Å")
+
+        # Houve troca?
+        if exp['houve_troca']:
+            lines.append(f"\n  ⚠ HOUVE TROCA DE COORDENADAS: {cand['serial']} ↔ {prox['serial']}")
+        else:
+            lines.append(f"\n  ✓ Candidato já estava na posição correta")
+
+        lines.append("")
+
+    lines.append("=" * 90)
+    return "\n".join(lines)
+
+
 def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
-                   start_serial: int, end_serial: int, verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], List[int]]:
+                   start_serial: int, end_serial: int, verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], List[int], List[Dict]]:
+    """
+    Executa a Fase 1: Reconstrução do backbone.
+
+    Returns:
+        Tupla (coords_atualizadas, backbone_ids, expansoes_janela)
+    """
     atom_by_serial = {a['serial']: a for a in atoms}
     backbone_ids = build_backbone_order(atoms, atom_by_serial, start_serial, end_serial)
     max_steps = len(backbone_ids) - 1
@@ -667,12 +761,13 @@ def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, floa
 
     # Com janela dinâmica, sempre encontra solução
     solution = solutions[0]
+    expansoes = stats.get("expansoes_janela", [])
 
     # Mostrar estatísticas de expansão se verbose
-    if verbose and stats["expansoes_janela"]:
-        print(f"  Backbone: {len(stats['expansoes_janela'])} passos precisaram de expansão de janela")
+    if verbose and expansoes:
+        print(f"  Backbone: {len(expansoes)} passos precisaram de expansão de janela")
 
-    return solution["coords"], backbone_ids
+    return solution["coords"], backbone_ids, expansoes
 
 
 # ==============================================================================
@@ -1359,27 +1454,29 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
 # ==============================================================================
 
 def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641,
-                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> Tuple[str, bool, str]:
+                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> Tuple[str, bool, str, List[Dict]]:
     """
     Processa um único frame da trajetória.
 
     Retorna:
-        Tupla (conteúdo_processado, sucesso, mensagem_erro)
+        Tupla (conteúdo_processado, sucesso, mensagem_erro, expansoes_backbone)
         - conteúdo_processado: String com frame (processado ou original se falhou)
         - sucesso: True se processou sem erros, False caso contrário
         - mensagem_erro: Descrição do erro (vazia se sucesso)
+        - expansoes_backbone: Lista com informações de expansões de janela
     """
     atoms, lines = parse_frame_content(frame_content)
 
     if not atoms:
-        return frame_content, False, "Frame vazio ou sem átomos válidos"
+        return frame_content, False, "Frame vazio ou sem átomos válidos", []
 
     coords = extrair_coords_de_atoms(atoms)
     erro_msg = ""
+    expansoes_backbone = []
 
     try:
         # FASE 1: Backbone
-        coords, backbone_ids = fase1_backbone(atoms, coords, start_serial, end_serial, verbose=False)
+        coords, backbone_ids, expansoes_backbone = fase1_backbone(atoms, coords, start_serial, end_serial, verbose=False)
         aplicar_coords_para_atoms(atoms, coords)
 
         # FASE 2: HN, HA, O
@@ -1426,14 +1523,14 @@ def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641
 
         # Atualizar linhas
         lines = update_pdb_lines(lines, atoms)
-        return "\n".join(lines), True, ""
+        return "\n".join(lines), True, "", expansoes_backbone
 
     except Exception as e:
         erro_msg = str(e)
         if verbose:
             print(f"  AVISO Frame {frame_num}: {erro_msg}")
-        # Retorna frame original em caso de erro
-        return "\n".join(lines), False, erro_msg
+        # Retorna frame original em caso de erro (com expansões parciais se existirem)
+        return "\n".join(lines), False, erro_msg, expansoes_backbone
 
 
 # ==============================================================================
@@ -1469,16 +1566,21 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
     processed_frames = []
     frames_com_falha = []  # Lista de tuplas (numero_frame, mensagem_erro)
     frames_sucesso = 0
+    todas_expansoes = []  # Lista de tuplas (numero_frame, lista_expansoes)
 
     for i, frame_content in enumerate(frames):
         frame_num = i + 1
         if verbose:
             print(f"\rProcessando frame {frame_num}/{total_frames}...", end="", flush=True)
 
-        processed_frame, sucesso, erro_msg = processar_frame(
+        processed_frame, sucesso, erro_msg, expansoes = processar_frame(
             frame_content, frame_num, start_serial, end_serial, chain, verbose=False
         )
         processed_frames.append(processed_frame)
+
+        # Registrar expansões (mesmo para frames com sucesso)
+        if expansoes:
+            todas_expansoes.append((frame_num, expansoes))
 
         if sucesso:
             frames_sucesso += 1
@@ -1529,6 +1631,37 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
 
         print("\n" + "-"*80)
         print(f"Diagnóstico detalhado salvo em: {diag_file}")
+
+    # Gerar relatório de expansões de janela
+    if todas_expansoes:
+        total_atomos_com_expansao = sum(len(exp) for _, exp in todas_expansoes)
+        frames_com_expansao = len(todas_expansoes)
+
+        print("\n" + "-"*80)
+        print("ESTATÍSTICAS DE EXPANSÃO DE JANELA DO BACKBONE:")
+        print("-"*80)
+        print(f"Frames que precisaram de expansão: {frames_com_expansao}/{total_frames}")
+        print(f"Total de átomos com expansão:      {total_atomos_com_expansao}")
+
+        # Gerar arquivo de relatório de expansões
+        expansao_file = pdb_saida.replace(".pdb", "_expansoes_backbone.txt")
+        with open(expansao_file, 'w') as f_exp:
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write("RELATÓRIO COMPLETO DE EXPANSÕES DE JANELA DO BACKBONE\n")
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write(f"Arquivo de entrada: {pdb_entrada}\n")
+            f_exp.write(f"Total de frames: {total_frames}\n")
+            f_exp.write(f"Frames com expansão: {frames_com_expansao}\n")
+            f_exp.write(f"Total de átomos com expansão: {total_atomos_com_expansao}\n")
+            f_exp.write("=" * 90 + "\n\n")
+
+            for frame_num, expansoes in todas_expansoes:
+                # Escrever relatório formatado para cada frame
+                relatorio = formatar_relatorio_expansoes(expansoes, frame_num)
+                f_exp.write(relatorio)
+                f_exp.write("\n\n")
+
+        print(f"Relatório de expansões salvo em:   {expansao_file}")
 
     print("\n" + "="*80)
     print(f"Arquivo de saída: {pdb_saida}")
