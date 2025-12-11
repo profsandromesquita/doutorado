@@ -456,14 +456,13 @@ def find_candidates_dynamic_window(
     d_min_base: float,
     d_max_base: float,
     ideal_angle: float,
-    delta: float = 0.01,
-    max_expansions: int = 50
+    delta: float = 0.01
 ) -> Tuple[List[Tuple[int, float]], float, float, int]:
     """
     Busca candidatos com janela dinâmica de distância.
 
     Se nenhum candidato for encontrado na janela inicial, expande a janela
-    em passos de ±delta até encontrar candidatos ou atingir max_expansions.
+    em passos de ±delta até encontrar candidatos.
 
     Args:
         all_serials: Lista de todos os seriais de átomos
@@ -475,7 +474,6 @@ def find_candidates_dynamic_window(
         d_max_base: Distância máxima inicial
         ideal_angle: Ângulo ideal para refinamento
         delta: Incremento de expansão da janela (default: 0.01 Å)
-        max_expansions: Número máximo de expansões permitidas
 
     Returns:
         Tupla (candidatos, d_min_final, d_max_final, num_expansoes)
@@ -485,7 +483,7 @@ def find_candidates_dynamic_window(
     d_max = d_max_base
     num_expansoes = 0
 
-    while num_expansoes <= max_expansions:
+    while True:
         candidatos = []
 
         for cand_id in all_serials:
@@ -520,26 +518,22 @@ def find_candidates_dynamic_window(
             return candidatos, d_min, d_max, num_expansoes
 
         # Expandir janela
-        d_min = max(0.5, d_min - delta)  # Não deixar menor que 0.5 Å
+        d_min = max(0.1, d_min - delta)  # Não deixar menor que 0.1 Å
         d_max = d_max + delta
         num_expansoes += 1
-
-    # Não encontrou candidatos mesmo após max_expansions
-    return [], d_min, d_max, num_expansoes
 
 
 def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                             backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
                             max_steps: int = 23, min_total: float = 30.0,
                             max_total: float = 40.0,
-                            delta: float = 0.01,
-                            max_expansions: int = 50) -> Tuple[List[Dict], Dict]:
+                            delta: float = 0.01) -> Tuple[List[Dict], Dict]:
     """
     Encontra caminho válido para o backbone usando janela dinâmica de distância.
 
-    A janela de distância é expandida em passos de ±delta quando nenhum candidato
-    é encontrado. Se múltiplos candidatos são encontrados, o refinamento angular
-    é usado para selecionar o melhor.
+    A janela de distância é expandida em passos de ±delta até encontrar candidatos.
+    Se múltiplos candidatos são encontrados, o refinamento angular é usado para
+    selecionar o melhor.
 
     Args:
         atoms: Lista de átomos
@@ -550,7 +544,6 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
         min_total: Distância total mínima aceitável
         max_total: Distância total máxima aceitável
         delta: Incremento de expansão da janela (default: 0.01 Å)
-        max_expansions: Número máximo de expansões da janela
 
     Returns:
         Tupla (solutions, stats)
@@ -562,12 +555,9 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
 
     start_id = backbone_ids[0]
     stats = {
-        "caminhos_estouraram_23_passos": 0,
-        "caminhos_passaram_40A_antes_23": 0,
         "caminhos_chegaram_alvo_23_menor_30A": 0,
         "caminhos_chegaram_alvo_23_entre_30e40A": 0,
-        "caminhos_mortos_sem_candidato": 0,
-        "diagnostico_caminhos_mortos": [],
+        "caminhos_passaram_40A": 0,
         "expansoes_janela": []  # Registrar quando janela foi expandida
     }
 
@@ -604,7 +594,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
         else:
             ideal_angle = 110.0  # Default para primeiro passo
 
-        # Buscar candidatos com janela dinâmica
+        # Buscar candidatos com janela dinâmica (expande até encontrar)
         candidatos, d_min_final, d_max_final, num_expansoes = find_candidates_dynamic_window(
             all_serials=all_serials,
             locked=locked,
@@ -614,72 +604,43 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
             d_min_base=d_min_base,
             d_max_base=d_max_base,
             ideal_angle=ideal_angle,
-            delta=delta,
-            max_expansions=max_expansions
+            delta=delta
         )
-
-        # Registrar expansão se ocorreu
-        if num_expansoes > 0:
-            stats["expansoes_janela"].append({
-                "passo": k,
-                "atomo_atual": f"{curr_atom['name']} ({curr_id})",
-                "atomo_proximo": f"{next_atom['name']} ({next_id})",
-                "janela_original": f"{d_min_base:.3f}-{d_max_base:.3f}",
-                "janela_expandida": f"{d_min_final:.3f}-{d_max_final:.3f}",
-                "expansoes": num_expansoes
-            })
-
-        if not candidatos:
-            # Não encontrou candidatos mesmo após expansão máxima
-            stats["caminhos_mortos_sem_candidato"] += 1
-
-            # Coletar diagnóstico detalhado
-            vizinhos_info = []
-            for cand_id in all_serials:
-                if cand_id in locked:
-                    continue
-                cand_coord = current_coords[cand_id]
-                d = dist_tuple(curr_coord, cand_coord)
-                cand_atom = atom_by_serial.get(cand_id, {})
-                vizinhos_info.append({
-                    "serial": cand_id,
-                    "nome": cand_atom.get("name", "?"),
-                    "residuo": cand_atom.get("resname", "?"),
-                    "res_seq": cand_atom.get("resseq", "?"),
-                    "distancia": round(d, 4),
-                    "status": "MUITO_PERTO" if d < d_min_final else ("MUITO_LONGE" if d > d_max_final else "OK")
-                })
-            vizinhos_info.sort(key=lambda x: x["distancia"])
-            vizinhos_proximos = vizinhos_info[:10]
-
-            diagnostico = {
-                "passo": k,
-                "passo_total": max_steps,
-                "atomo_atual": {
-                    "serial": curr_id,
-                    "nome": curr_atom["name"],
-                    "residuo": curr_atom["resname"],
-                    "res_seq": curr_atom["resseq"]
-                },
-                "atomo_proximo_esperado": {
-                    "serial": next_id,
-                    "nome": next_atom["name"],
-                    "residuo": next_atom["resname"],
-                    "res_seq": next_atom["resseq"]
-                },
-                "janela_distancia": {"min": d_min_base, "max": d_max_base},
-                "janela_expandida": {"min": d_min_final, "max": d_max_final},
-                "expansoes_realizadas": num_expansoes,
-                "atomos_travados": len(locked),
-                "atomos_nao_travados": len(all_serials) - len(locked),
-                "vizinhos_mais_proximos": vizinhos_proximos,
-                "caminho_percorrido": edges[-3:] if edges else []
-            }
-            stats["diagnostico_caminhos_mortos"].append(diagnostico)
-            return [], stats
 
         # Selecionar o melhor candidato (primeiro da lista ordenada)
         best_cand_id, best_dist = candidatos[0]
+
+        # Registrar expansão se ocorreu
+        if num_expansoes > 0:
+            # Encontrar informações do candidato selecionado
+            cand_atom = atom_by_serial.get(best_cand_id, {})
+            stats["expansoes_janela"].append({
+                "passo": k + 1,  # Passo 1-based para relatório
+                "passo_total": max_steps,
+                "atomo_atual": {
+                    "serial": curr_id,
+                    "nome": curr_atom['name'],
+                    "residuo": curr_atom['resname'],
+                    "res_seq": curr_atom['resseq']
+                },
+                "atomo_proximo": {
+                    "serial": next_id,
+                    "nome": next_atom['name'],
+                    "residuo": next_atom['resname'],
+                    "res_seq": next_atom['resseq']
+                },
+                "janela_original": {"min": d_min_base, "max": d_max_base},
+                "janela_expandida": {"min": d_min_final, "max": d_max_final},
+                "expansoes": num_expansoes,
+                "candidato_encontrado": {
+                    "serial": best_cand_id,
+                    "nome": cand_atom.get('name', '?'),
+                    "residuo": cand_atom.get('resname', '?'),
+                    "res_seq": cand_atom.get('resseq', '?'),
+                    "distancia": best_dist
+                },
+                "houve_troca": best_cand_id != next_id
+            })
 
         # Fazer a troca de coordenadas se necessário
         if best_cand_id != next_id:
@@ -704,7 +665,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     elif total_dist <= max_total:
         stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
     else:
-        stats["caminhos_passaram_40A_antes_23"] += 1
+        stats["caminhos_passaram_40A"] += 1
 
     # Criar solução
     solution = {
@@ -718,100 +679,95 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     return [solution], stats
 
 
-def formatar_diagnostico_caminho_morto(diag: dict) -> str:
-    """Formata um diagnóstico de caminho morto para exibição legível."""
+def formatar_relatorio_expansoes(expansoes: List[Dict], frame_num: int = None) -> str:
+    """
+    Formata um relatório detalhado de todas as expansões de janela realizadas.
+
+    Args:
+        expansoes: Lista de dicionários com informações de cada expansão
+        frame_num: Número do frame (opcional, para relatórios multi-frame)
+
+    Returns:
+        String formatada com o relatório completo
+    """
+    if not expansoes:
+        return ""
+
     lines = []
-    lines.append("\n" + "=" * 80)
-    lines.append("DIAGNÓSTICO DETALHADO - CAMINHO MORTO")
-    lines.append("=" * 80)
+    lines.append("=" * 90)
+    if frame_num is not None:
+        lines.append(f"RELATÓRIO DE EXPANSÕES DE JANELA - FRAME {frame_num}")
+    else:
+        lines.append("RELATÓRIO DE EXPANSÕES DE JANELA DO BACKBONE")
+    lines.append("=" * 90)
+    lines.append(f"\nTotal de átomos que necessitaram expansão: {len(expansoes)}")
+    lines.append("")
 
-    # Informação do passo onde morreu
-    lines.append(f"\nFalha no passo {diag['passo']}/{diag['passo_total']} da busca no backbone")
+    for i, exp in enumerate(expansoes, 1):
+        lines.append("-" * 90)
+        lines.append(f"EXPANSÃO #{i}")
+        lines.append("-" * 90)
 
-    # Átomo atual e próximo esperado
-    curr = diag['atomo_atual']
-    next_atom = diag['atomo_proximo_esperado']
-    lines.append(f"\nÁtomo atual:           {curr['nome']:4s} (serial {curr['serial']}) - {curr['residuo']} {curr['res_seq']}")
-    lines.append(f"Próximo esperado:      {next_atom['nome']:4s} (serial {next_atom['serial']}) - {next_atom['residuo']} {next_atom['res_seq']}")
+        # Informações do passo
+        lines.append(f"Passo: {exp['passo']}/{exp['passo_total']}")
 
-    # Janela de distância
-    janela = diag['janela_distancia']
-    lines.append(f"\nJanela de distância original: {janela['min']:.3f} - {janela['max']:.3f} Å")
+        # Átomo atual
+        curr = exp['atomo_atual']
+        lines.append(f"\nÁtomo atual:     {curr['nome']:4s} (serial {curr['serial']}) - {curr['residuo']} {curr['res_seq']}")
 
-    # Janela expandida (se aplicável)
-    if 'janela_expandida' in diag:
-        janela_exp = diag['janela_expandida']
-        expansoes = diag.get('expansoes_realizadas', 0)
-        lines.append(f"Janela após expansão:         {janela_exp['min']:.3f} - {janela_exp['max']:.3f} Å")
-        lines.append(f"Número de expansões:          {expansoes} (max: 50)")
+        # Átomo próximo esperado
+        prox = exp['atomo_proximo']
+        lines.append(f"Próximo esperado: {prox['nome']:4s} (serial {prox['serial']}) - {prox['residuo']} {prox['res_seq']}")
 
-    # Status de átomos
-    lines.append(f"\nÁtomos já usados (travados): {diag['atomos_travados']}")
-    lines.append(f"Átomos disponíveis:          {diag['atomos_nao_travados']}")
+        # Janela de distância
+        jan_orig = exp['janela_original']
+        jan_exp = exp['janela_expandida']
+        lines.append(f"\nJanela original:  {jan_orig['min']:.3f} - {jan_orig['max']:.3f} Å")
+        lines.append(f"Janela expandida: {jan_exp['min']:.3f} - {jan_exp['max']:.3f} Å")
+        lines.append(f"Expansões necessárias: {exp['expansoes']} (delta: ±{exp['expansoes'] * 0.01:.2f} Å)")
 
-    # Vizinhos mais próximos
-    lines.append(f"\n10 átomos mais próximos (não travados):")
-    lines.append("-" * 80)
-    lines.append(f"{'Serial':>7} {'Nome':>5} {'Resíduo':>8} {'ResSeq':>7} {'Distância':>12} {'Status':>14}")
-    lines.append("-" * 80)
+        # Candidato encontrado
+        cand = exp['candidato_encontrado']
+        lines.append(f"\nCandidato encontrado:")
+        lines.append(f"  Serial: {cand['serial']}")
+        lines.append(f"  Nome: {cand['nome']}")
+        lines.append(f"  Resíduo: {cand['residuo']} {cand['res_seq']}")
+        lines.append(f"  Distância: {cand['distancia']:.4f} Å")
 
-    for viz in diag['vizinhos_mais_proximos']:
-        lines.append(f"{viz['serial']:>7} {viz['nome']:>5} {viz['residuo']:>8} {viz['res_seq']:>7} {viz['distancia']:>10.4f} Å {viz['status']:>14}")
+        # Houve troca?
+        if exp['houve_troca']:
+            lines.append(f"\n  ⚠ HOUVE TROCA DE COORDENADAS: {cand['serial']} ↔ {prox['serial']}")
+        else:
+            lines.append(f"\n  ✓ Candidato já estava na posição correta")
 
-    # Análise do problema
-    lines.append("\n" + "-" * 80)
-    lines.append("ANÁLISE DO PROBLEMA:")
-    lines.append("-" * 80)
+        lines.append("")
 
-    vizinhos = diag['vizinhos_mais_proximos']
-    if vizinhos:
-        mais_proximo = vizinhos[0]
-        if mais_proximo['status'] == 'MUITO_PERTO':
-            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
-            lines.append(f"  que é MENOR que o mínimo permitido ({janela['min']:.2f} Å)")
-            lines.append(f"  Possível causa: coordenadas muito compactadas ou sobrepostas")
-        elif mais_proximo['status'] == 'MUITO_LONGE':
-            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
-            lines.append(f"  que é MAIOR que o máximo permitido ({janela['max']:.2f} Å)")
-            lines.append(f"  Possível causa: estrutura muito esticada ou átomos dispersos")
-
-        # Verificar quantos estão perto demais vs longe demais
-        muito_perto = sum(1 for v in vizinhos if v['status'] == 'MUITO_PERTO')
-        muito_longe = sum(1 for v in vizinhos if v['status'] == 'MUITO_LONGE')
-        lines.append(f"\n  Dos 10 mais próximos: {muito_perto} muito perto, {muito_longe} muito longe")
-
-    # Caminho percorrido até o momento
-    if diag.get('caminho_percorrido'):
-        lines.append(f"\nÚltimos passos antes da falha:")
-        for edge in diag['caminho_percorrido']:
-            lines.append(f"  {edge['from']} → {edge['to']} (doador: {edge['donor']}, dist: {edge['distance']:.4f} Å)")
-
-    lines.append("=" * 80)
+    lines.append("=" * 90)
     return "\n".join(lines)
 
 
 def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
-                   start_serial: int, end_serial: int, verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], List[int]]:
+                   start_serial: int, end_serial: int, verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], List[int], List[Dict]]:
+    """
+    Executa a Fase 1: Reconstrução do backbone.
+
+    Returns:
+        Tupla (coords_atualizadas, backbone_ids, expansoes_janela)
+    """
     atom_by_serial = {a['serial']: a for a in atoms}
     backbone_ids = build_backbone_order(atoms, atom_by_serial, start_serial, end_serial)
     max_steps = len(backbone_ids) - 1
     solutions, stats = find_all_backbone_paths(atoms, atom_by_serial, backbone_ids, coords, max_steps, 30.0, 40.0)
 
-    if not solutions:
-        # Formatar diagnóstico detalhado para mensagem de erro
-        diagnosticos = stats.get("diagnostico_caminhos_mortos", [])
-        if diagnosticos:
-            # Pegar o diagnóstico mais relevante (o que morreu no passo mais avançado)
-            diag_mais_avancado = max(diagnosticos, key=lambda x: x["passo"])
-            diag_str = formatar_diagnostico_caminho_morto(diag_mais_avancado)
-        else:
-            diag_str = "Sem diagnóstico detalhado disponível"
-
-        stats_resumo = {k: v for k, v in stats.items() if k != "diagnostico_caminhos_mortos"}
-        raise RuntimeError(f"Nenhum caminho válido encontrado para o backbone!\nResumo: {stats_resumo}\n{diag_str}")
-
+    # Com janela dinâmica, sempre encontra solução
     solution = solutions[0]
-    return solution["coords"], backbone_ids
+    expansoes = stats.get("expansoes_janela", [])
+
+    # Mostrar estatísticas de expansão se verbose
+    if verbose and expansoes:
+        print(f"  Backbone: {len(expansoes)} passos precisaram de expansão de janela")
+
+    return solution["coords"], backbone_ids, expansoes
 
 
 # ==============================================================================
@@ -1498,27 +1454,29 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
 # ==============================================================================
 
 def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641,
-                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> Tuple[str, bool, str]:
+                    end_serial: int = 8776, chain: str = "B", verbose: bool = False) -> Tuple[str, bool, str, List[Dict]]:
     """
     Processa um único frame da trajetória.
 
     Retorna:
-        Tupla (conteúdo_processado, sucesso, mensagem_erro)
+        Tupla (conteúdo_processado, sucesso, mensagem_erro, expansoes_backbone)
         - conteúdo_processado: String com frame (processado ou original se falhou)
         - sucesso: True se processou sem erros, False caso contrário
         - mensagem_erro: Descrição do erro (vazia se sucesso)
+        - expansoes_backbone: Lista com informações de expansões de janela
     """
     atoms, lines = parse_frame_content(frame_content)
 
     if not atoms:
-        return frame_content, False, "Frame vazio ou sem átomos válidos"
+        return frame_content, False, "Frame vazio ou sem átomos válidos", []
 
     coords = extrair_coords_de_atoms(atoms)
     erro_msg = ""
+    expansoes_backbone = []
 
     try:
         # FASE 1: Backbone
-        coords, backbone_ids = fase1_backbone(atoms, coords, start_serial, end_serial, verbose=False)
+        coords, backbone_ids, expansoes_backbone = fase1_backbone(atoms, coords, start_serial, end_serial, verbose=False)
         aplicar_coords_para_atoms(atoms, coords)
 
         # FASE 2: HN, HA, O
@@ -1565,14 +1523,14 @@ def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641
 
         # Atualizar linhas
         lines = update_pdb_lines(lines, atoms)
-        return "\n".join(lines), True, ""
+        return "\n".join(lines), True, "", expansoes_backbone
 
     except Exception as e:
         erro_msg = str(e)
         if verbose:
             print(f"  AVISO Frame {frame_num}: {erro_msg}")
-        # Retorna frame original em caso de erro
-        return "\n".join(lines), False, erro_msg
+        # Retorna frame original em caso de erro (com expansões parciais se existirem)
+        return "\n".join(lines), False, erro_msg, expansoes_backbone
 
 
 # ==============================================================================
@@ -1608,16 +1566,21 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
     processed_frames = []
     frames_com_falha = []  # Lista de tuplas (numero_frame, mensagem_erro)
     frames_sucesso = 0
+    todas_expansoes = []  # Lista de tuplas (numero_frame, lista_expansoes)
 
     for i, frame_content in enumerate(frames):
         frame_num = i + 1
         if verbose:
             print(f"\rProcessando frame {frame_num}/{total_frames}...", end="", flush=True)
 
-        processed_frame, sucesso, erro_msg = processar_frame(
+        processed_frame, sucesso, erro_msg, expansoes = processar_frame(
             frame_content, frame_num, start_serial, end_serial, chain, verbose=False
         )
         processed_frames.append(processed_frame)
+
+        # Registrar expansões (mesmo para frames com sucesso)
+        if expansoes:
+            todas_expansoes.append((frame_num, expansoes))
 
         if sucesso:
             frames_sucesso += 1
@@ -1668,6 +1631,37 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
 
         print("\n" + "-"*80)
         print(f"Diagnóstico detalhado salvo em: {diag_file}")
+
+    # Gerar relatório de expansões de janela
+    if todas_expansoes:
+        total_atomos_com_expansao = sum(len(exp) for _, exp in todas_expansoes)
+        frames_com_expansao = len(todas_expansoes)
+
+        print("\n" + "-"*80)
+        print("ESTATÍSTICAS DE EXPANSÃO DE JANELA DO BACKBONE:")
+        print("-"*80)
+        print(f"Frames que precisaram de expansão: {frames_com_expansao}/{total_frames}")
+        print(f"Total de átomos com expansão:      {total_atomos_com_expansao}")
+
+        # Gerar arquivo de relatório de expansões
+        expansao_file = pdb_saida.replace(".pdb", "_expansoes_backbone.txt")
+        with open(expansao_file, 'w') as f_exp:
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write("RELATÓRIO COMPLETO DE EXPANSÕES DE JANELA DO BACKBONE\n")
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write(f"Arquivo de entrada: {pdb_entrada}\n")
+            f_exp.write(f"Total de frames: {total_frames}\n")
+            f_exp.write(f"Frames com expansão: {frames_com_expansao}\n")
+            f_exp.write(f"Total de átomos com expansão: {total_atomos_com_expansao}\n")
+            f_exp.write("=" * 90 + "\n\n")
+
+            for frame_num, expansoes in todas_expansoes:
+                # Escrever relatório formatado para cada frame
+                relatorio = formatar_relatorio_expansoes(expansoes, frame_num)
+                f_exp.write(relatorio)
+                f_exp.write("\n\n")
+
+        print(f"Relatório de expansões salvo em:   {expansao_file}")
 
     print("\n" + "="*80)
     print(f"Arquivo de saída: {pdb_saida}")
