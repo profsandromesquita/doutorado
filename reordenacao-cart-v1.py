@@ -421,7 +421,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     start_id = backbone_ids[0]
     stats = {"caminhos_estouraram_23_passos": 0, "caminhos_passaram_40A_antes_23": 0,
              "caminhos_chegaram_alvo_23_menor_30A": 0, "caminhos_chegaram_alvo_23_entre_30e40A": 0,
-             "caminhos_mortos_sem_candidato": 0}
+             "caminhos_mortos_sem_candidato": 0, "diagnostico_caminhos_mortos": []}
     solutions = []
     inicial = {"step": 0, "coords": coords.copy(), "locked": {start_id}, "total": 0.0, "edges": []}
     stack = [inicial]
@@ -480,8 +480,115 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
 
         if not found_candidate:
             stats["caminhos_mortos_sem_candidato"] += 1
+            # Coletar diagnóstico detalhado sobre por que o caminho morreu
+            vizinhos_info = []
+            for cand_id in all_serials:
+                if cand_id in state["locked"]:
+                    continue
+                cand_coord = state["coords"][cand_id]
+                d = dist_tuple(curr_coord, cand_coord)
+                cand_atom = atom_by_serial.get(cand_id, {})
+                vizinhos_info.append({
+                    "serial": cand_id,
+                    "nome": cand_atom.get("name", "?"),
+                    "residuo": cand_atom.get("resName", "?"),
+                    "res_seq": cand_atom.get("resSeq", "?"),
+                    "distancia": round(d, 4),
+                    "status": "MUITO_PERTO" if d < d_min else ("MUITO_LONGE" if d > d_max else "OK")
+                })
+            # Ordenar por distância e pegar os 10 mais próximos
+            vizinhos_info.sort(key=lambda x: x["distancia"])
+            vizinhos_proximos = vizinhos_info[:10]
+
+            diagnostico = {
+                "passo": k,
+                "passo_total": max_steps,
+                "atomo_atual": {
+                    "serial": curr_id,
+                    "nome": curr_atom["name"],
+                    "residuo": curr_atom["resName"],
+                    "res_seq": curr_atom["resSeq"]
+                },
+                "atomo_proximo_esperado": {
+                    "serial": next_id,
+                    "nome": next_atom["name"],
+                    "residuo": next_atom["resName"],
+                    "res_seq": next_atom["resSeq"]
+                },
+                "janela_distancia": {"min": d_min, "max": d_max},
+                "atomos_travados": len(state["locked"]),
+                "atomos_nao_travados": len(all_serials) - len(state["locked"]),
+                "vizinhos_mais_proximos": vizinhos_proximos,
+                "caminho_percorrido": state["edges"][-3:] if state["edges"] else []  # últimos 3 passos
+            }
+            stats["diagnostico_caminhos_mortos"].append(diagnostico)
 
     return solutions, stats
+
+
+def formatar_diagnostico_caminho_morto(diag: dict) -> str:
+    """Formata um diagnóstico de caminho morto para exibição legível."""
+    lines = []
+    lines.append("\n" + "=" * 80)
+    lines.append("DIAGNÓSTICO DETALHADO - CAMINHO MORTO")
+    lines.append("=" * 80)
+
+    # Informação do passo onde morreu
+    lines.append(f"\nFalha no passo {diag['passo']}/{diag['passo_total']} da busca no backbone")
+
+    # Átomo atual e próximo esperado
+    curr = diag['atomo_atual']
+    next_atom = diag['atomo_proximo_esperado']
+    lines.append(f"\nÁtomo atual:           {curr['nome']:4s} (serial {curr['serial']}) - {curr['residuo']} {curr['res_seq']}")
+    lines.append(f"Próximo esperado:      {next_atom['nome']:4s} (serial {next_atom['serial']}) - {next_atom['residuo']} {next_atom['res_seq']}")
+
+    # Janela de distância
+    janela = diag['janela_distancia']
+    lines.append(f"\nJanela de distância:   {janela['min']:.2f} - {janela['max']:.2f} Å")
+
+    # Status de átomos
+    lines.append(f"\nÁtomos já usados (travados): {diag['atomos_travados']}")
+    lines.append(f"Átomos disponíveis:          {diag['atomos_nao_travados']}")
+
+    # Vizinhos mais próximos
+    lines.append(f"\n10 átomos mais próximos (não travados):")
+    lines.append("-" * 80)
+    lines.append(f"{'Serial':>7} {'Nome':>5} {'Resíduo':>8} {'ResSeq':>7} {'Distância':>12} {'Status':>14}")
+    lines.append("-" * 80)
+
+    for viz in diag['vizinhos_mais_proximos']:
+        lines.append(f"{viz['serial']:>7} {viz['nome']:>5} {viz['residuo']:>8} {viz['res_seq']:>7} {viz['distancia']:>10.4f} Å {viz['status']:>14}")
+
+    # Análise do problema
+    lines.append("\n" + "-" * 80)
+    lines.append("ANÁLISE DO PROBLEMA:")
+    lines.append("-" * 80)
+
+    vizinhos = diag['vizinhos_mais_proximos']
+    if vizinhos:
+        mais_proximo = vizinhos[0]
+        if mais_proximo['status'] == 'MUITO_PERTO':
+            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
+            lines.append(f"  que é MENOR que o mínimo permitido ({janela['min']:.2f} Å)")
+            lines.append(f"  Possível causa: coordenadas muito compactadas ou sobrepostas")
+        elif mais_proximo['status'] == 'MUITO_LONGE':
+            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
+            lines.append(f"  que é MAIOR que o máximo permitido ({janela['max']:.2f} Å)")
+            lines.append(f"  Possível causa: estrutura muito esticada ou átomos dispersos")
+
+        # Verificar quantos estão perto demais vs longe demais
+        muito_perto = sum(1 for v in vizinhos if v['status'] == 'MUITO_PERTO')
+        muito_longe = sum(1 for v in vizinhos if v['status'] == 'MUITO_LONGE')
+        lines.append(f"\n  Dos 10 mais próximos: {muito_perto} muito perto, {muito_longe} muito longe")
+
+    # Caminho percorrido até o momento
+    if diag.get('caminho_percorrido'):
+        lines.append(f"\nÚltimos passos antes da falha:")
+        for edge in diag['caminho_percorrido']:
+            lines.append(f"  {edge['from']} → {edge['to']} (doador: {edge['donor']}, dist: {edge['distance']:.4f} Å)")
+
+    lines.append("=" * 80)
+    return "\n".join(lines)
 
 
 def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
@@ -492,7 +599,17 @@ def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, floa
     solutions, stats = find_all_backbone_paths(atoms, atom_by_serial, backbone_ids, coords, max_steps, 30.0, 40.0)
 
     if not solutions:
-        raise RuntimeError(f"Nenhum caminho válido encontrado para o backbone! Stats: {stats}")
+        # Formatar diagnóstico detalhado para mensagem de erro
+        diagnosticos = stats.get("diagnostico_caminhos_mortos", [])
+        if diagnosticos:
+            # Pegar o diagnóstico mais relevante (o que morreu no passo mais avançado)
+            diag_mais_avancado = max(diagnosticos, key=lambda x: x["passo"])
+            diag_str = formatar_diagnostico_caminho_morto(diag_mais_avancado)
+        else:
+            diag_str = "Sem diagnóstico detalhado disponível"
+
+        stats_resumo = {k: v for k, v in stats.items() if k != "diagnostico_caminhos_mortos"}
+        raise RuntimeError(f"Nenhum caminho válido encontrado para o backbone!\nResumo: {stats_resumo}\n{diag_str}")
 
     solution = solutions[0]
     return solution["coords"], backbone_ids
@@ -1326,8 +1443,32 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
         print("\n" + "-"*80)
         print("FRAMES COM FALHA (mantidos com coordenadas originais):")
         print("-"*80)
-        for frame_num, erro in frames_com_falha:
-            print(f"  Frame {frame_num}: {erro}")
+
+        # Gerar arquivo de diagnóstico detalhado
+        diag_file = pdb_saida.replace(".pdb", "_diagnostico.txt")
+        with open(diag_file, 'w') as f_diag:
+            f_diag.write("="*80 + "\n")
+            f_diag.write("RELATÓRIO DETALHADO DE DIAGNÓSTICO - FRAMES COM FALHA\n")
+            f_diag.write("="*80 + "\n")
+            f_diag.write(f"Arquivo de entrada: {pdb_entrada}\n")
+            f_diag.write(f"Total de frames: {total_frames}\n")
+            f_diag.write(f"Frames com falha: {len(frames_com_falha)}\n")
+            f_diag.write("="*80 + "\n\n")
+
+            for frame_num, erro in frames_com_falha:
+                # Extrair resumo curto para console
+                primeira_linha = erro.split('\n')[0] if '\n' in erro else erro
+                print(f"  Frame {frame_num}: {primeira_linha[:100]}...")
+
+                # Escrever diagnóstico completo no arquivo
+                f_diag.write(f"\n{'#'*80}\n")
+                f_diag.write(f"# FRAME {frame_num}\n")
+                f_diag.write(f"{'#'*80}\n\n")
+                f_diag.write(erro)
+                f_diag.write("\n\n")
+
+        print("\n" + "-"*80)
+        print(f"Diagnóstico detalhado salvo em: {diag_file}")
 
     print("\n" + "="*80)
     print(f"Arquivo de saída: {pdb_saida}")
