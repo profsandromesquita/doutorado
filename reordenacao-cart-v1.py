@@ -456,14 +456,13 @@ def find_candidates_dynamic_window(
     d_min_base: float,
     d_max_base: float,
     ideal_angle: float,
-    delta: float = 0.01,
-    max_expansions: int = 50
+    delta: float = 0.01
 ) -> Tuple[List[Tuple[int, float]], float, float, int]:
     """
     Busca candidatos com janela dinâmica de distância.
 
     Se nenhum candidato for encontrado na janela inicial, expande a janela
-    em passos de ±delta até encontrar candidatos ou atingir max_expansions.
+    em passos de ±delta até encontrar candidatos.
 
     Args:
         all_serials: Lista de todos os seriais de átomos
@@ -475,7 +474,6 @@ def find_candidates_dynamic_window(
         d_max_base: Distância máxima inicial
         ideal_angle: Ângulo ideal para refinamento
         delta: Incremento de expansão da janela (default: 0.01 Å)
-        max_expansions: Número máximo de expansões permitidas
 
     Returns:
         Tupla (candidatos, d_min_final, d_max_final, num_expansoes)
@@ -485,7 +483,7 @@ def find_candidates_dynamic_window(
     d_max = d_max_base
     num_expansoes = 0
 
-    while num_expansoes <= max_expansions:
+    while True:
         candidatos = []
 
         for cand_id in all_serials:
@@ -520,26 +518,22 @@ def find_candidates_dynamic_window(
             return candidatos, d_min, d_max, num_expansoes
 
         # Expandir janela
-        d_min = max(0.5, d_min - delta)  # Não deixar menor que 0.5 Å
+        d_min = max(0.1, d_min - delta)  # Não deixar menor que 0.1 Å
         d_max = d_max + delta
         num_expansoes += 1
-
-    # Não encontrou candidatos mesmo após max_expansions
-    return [], d_min, d_max, num_expansoes
 
 
 def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                             backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
                             max_steps: int = 23, min_total: float = 30.0,
                             max_total: float = 40.0,
-                            delta: float = 0.01,
-                            max_expansions: int = 50) -> Tuple[List[Dict], Dict]:
+                            delta: float = 0.01) -> Tuple[List[Dict], Dict]:
     """
     Encontra caminho válido para o backbone usando janela dinâmica de distância.
 
-    A janela de distância é expandida em passos de ±delta quando nenhum candidato
-    é encontrado. Se múltiplos candidatos são encontrados, o refinamento angular
-    é usado para selecionar o melhor.
+    A janela de distância é expandida em passos de ±delta até encontrar candidatos.
+    Se múltiplos candidatos são encontrados, o refinamento angular é usado para
+    selecionar o melhor.
 
     Args:
         atoms: Lista de átomos
@@ -550,7 +544,6 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
         min_total: Distância total mínima aceitável
         max_total: Distância total máxima aceitável
         delta: Incremento de expansão da janela (default: 0.01 Å)
-        max_expansions: Número máximo de expansões da janela
 
     Returns:
         Tupla (solutions, stats)
@@ -562,12 +555,9 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
 
     start_id = backbone_ids[0]
     stats = {
-        "caminhos_estouraram_23_passos": 0,
-        "caminhos_passaram_40A_antes_23": 0,
         "caminhos_chegaram_alvo_23_menor_30A": 0,
         "caminhos_chegaram_alvo_23_entre_30e40A": 0,
-        "caminhos_mortos_sem_candidato": 0,
-        "diagnostico_caminhos_mortos": [],
+        "caminhos_passaram_40A": 0,
         "expansoes_janela": []  # Registrar quando janela foi expandida
     }
 
@@ -604,7 +594,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
         else:
             ideal_angle = 110.0  # Default para primeiro passo
 
-        # Buscar candidatos com janela dinâmica
+        # Buscar candidatos com janela dinâmica (expande até encontrar)
         candidatos, d_min_final, d_max_final, num_expansoes = find_candidates_dynamic_window(
             all_serials=all_serials,
             locked=locked,
@@ -614,8 +604,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
             d_min_base=d_min_base,
             d_max_base=d_max_base,
             ideal_angle=ideal_angle,
-            delta=delta,
-            max_expansions=max_expansions
+            delta=delta
         )
 
         # Registrar expansão se ocorreu
@@ -628,55 +617,6 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                 "janela_expandida": f"{d_min_final:.3f}-{d_max_final:.3f}",
                 "expansoes": num_expansoes
             })
-
-        if not candidatos:
-            # Não encontrou candidatos mesmo após expansão máxima
-            stats["caminhos_mortos_sem_candidato"] += 1
-
-            # Coletar diagnóstico detalhado
-            vizinhos_info = []
-            for cand_id in all_serials:
-                if cand_id in locked:
-                    continue
-                cand_coord = current_coords[cand_id]
-                d = dist_tuple(curr_coord, cand_coord)
-                cand_atom = atom_by_serial.get(cand_id, {})
-                vizinhos_info.append({
-                    "serial": cand_id,
-                    "nome": cand_atom.get("name", "?"),
-                    "residuo": cand_atom.get("resname", "?"),
-                    "res_seq": cand_atom.get("resseq", "?"),
-                    "distancia": round(d, 4),
-                    "status": "MUITO_PERTO" if d < d_min_final else ("MUITO_LONGE" if d > d_max_final else "OK")
-                })
-            vizinhos_info.sort(key=lambda x: x["distancia"])
-            vizinhos_proximos = vizinhos_info[:10]
-
-            diagnostico = {
-                "passo": k,
-                "passo_total": max_steps,
-                "atomo_atual": {
-                    "serial": curr_id,
-                    "nome": curr_atom["name"],
-                    "residuo": curr_atom["resname"],
-                    "res_seq": curr_atom["resseq"]
-                },
-                "atomo_proximo_esperado": {
-                    "serial": next_id,
-                    "nome": next_atom["name"],
-                    "residuo": next_atom["resname"],
-                    "res_seq": next_atom["resseq"]
-                },
-                "janela_distancia": {"min": d_min_base, "max": d_max_base},
-                "janela_expandida": {"min": d_min_final, "max": d_max_final},
-                "expansoes_realizadas": num_expansoes,
-                "atomos_travados": len(locked),
-                "atomos_nao_travados": len(all_serials) - len(locked),
-                "vizinhos_mais_proximos": vizinhos_proximos,
-                "caminho_percorrido": edges[-3:] if edges else []
-            }
-            stats["diagnostico_caminhos_mortos"].append(diagnostico)
-            return [], stats
 
         # Selecionar o melhor candidato (primeiro da lista ordenada)
         best_cand_id, best_dist = candidatos[0]
@@ -704,7 +644,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     elif total_dist <= max_total:
         stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
     else:
-        stats["caminhos_passaram_40A_antes_23"] += 1
+        stats["caminhos_passaram_40A"] += 1
 
     # Criar solução
     solution = {
@@ -718,78 +658,6 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
     return [solution], stats
 
 
-def formatar_diagnostico_caminho_morto(diag: dict) -> str:
-    """Formata um diagnóstico de caminho morto para exibição legível."""
-    lines = []
-    lines.append("\n" + "=" * 80)
-    lines.append("DIAGNÓSTICO DETALHADO - CAMINHO MORTO")
-    lines.append("=" * 80)
-
-    # Informação do passo onde morreu
-    lines.append(f"\nFalha no passo {diag['passo']}/{diag['passo_total']} da busca no backbone")
-
-    # Átomo atual e próximo esperado
-    curr = diag['atomo_atual']
-    next_atom = diag['atomo_proximo_esperado']
-    lines.append(f"\nÁtomo atual:           {curr['nome']:4s} (serial {curr['serial']}) - {curr['residuo']} {curr['res_seq']}")
-    lines.append(f"Próximo esperado:      {next_atom['nome']:4s} (serial {next_atom['serial']}) - {next_atom['residuo']} {next_atom['res_seq']}")
-
-    # Janela de distância
-    janela = diag['janela_distancia']
-    lines.append(f"\nJanela de distância original: {janela['min']:.3f} - {janela['max']:.3f} Å")
-
-    # Janela expandida (se aplicável)
-    if 'janela_expandida' in diag:
-        janela_exp = diag['janela_expandida']
-        expansoes = diag.get('expansoes_realizadas', 0)
-        lines.append(f"Janela após expansão:         {janela_exp['min']:.3f} - {janela_exp['max']:.3f} Å")
-        lines.append(f"Número de expansões:          {expansoes} (max: 50)")
-
-    # Status de átomos
-    lines.append(f"\nÁtomos já usados (travados): {diag['atomos_travados']}")
-    lines.append(f"Átomos disponíveis:          {diag['atomos_nao_travados']}")
-
-    # Vizinhos mais próximos
-    lines.append(f"\n10 átomos mais próximos (não travados):")
-    lines.append("-" * 80)
-    lines.append(f"{'Serial':>7} {'Nome':>5} {'Resíduo':>8} {'ResSeq':>7} {'Distância':>12} {'Status':>14}")
-    lines.append("-" * 80)
-
-    for viz in diag['vizinhos_mais_proximos']:
-        lines.append(f"{viz['serial']:>7} {viz['nome']:>5} {viz['residuo']:>8} {viz['res_seq']:>7} {viz['distancia']:>10.4f} Å {viz['status']:>14}")
-
-    # Análise do problema
-    lines.append("\n" + "-" * 80)
-    lines.append("ANÁLISE DO PROBLEMA:")
-    lines.append("-" * 80)
-
-    vizinhos = diag['vizinhos_mais_proximos']
-    if vizinhos:
-        mais_proximo = vizinhos[0]
-        if mais_proximo['status'] == 'MUITO_PERTO':
-            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
-            lines.append(f"  que é MENOR que o mínimo permitido ({janela['min']:.2f} Å)")
-            lines.append(f"  Possível causa: coordenadas muito compactadas ou sobrepostas")
-        elif mais_proximo['status'] == 'MUITO_LONGE':
-            lines.append(f"→ O átomo mais próximo ({mais_proximo['nome']}) está a {mais_proximo['distancia']:.4f} Å")
-            lines.append(f"  que é MAIOR que o máximo permitido ({janela['max']:.2f} Å)")
-            lines.append(f"  Possível causa: estrutura muito esticada ou átomos dispersos")
-
-        # Verificar quantos estão perto demais vs longe demais
-        muito_perto = sum(1 for v in vizinhos if v['status'] == 'MUITO_PERTO')
-        muito_longe = sum(1 for v in vizinhos if v['status'] == 'MUITO_LONGE')
-        lines.append(f"\n  Dos 10 mais próximos: {muito_perto} muito perto, {muito_longe} muito longe")
-
-    # Caminho percorrido até o momento
-    if diag.get('caminho_percorrido'):
-        lines.append(f"\nÚltimos passos antes da falha:")
-        for edge in diag['caminho_percorrido']:
-            lines.append(f"  {edge['from']} → {edge['to']} (doador: {edge['donor']}, dist: {edge['distance']:.4f} Å)")
-
-    lines.append("=" * 80)
-    return "\n".join(lines)
-
-
 def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
                    start_serial: int, end_serial: int, verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], List[int]]:
     atom_by_serial = {a['serial']: a for a in atoms}
@@ -797,20 +665,13 @@ def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, floa
     max_steps = len(backbone_ids) - 1
     solutions, stats = find_all_backbone_paths(atoms, atom_by_serial, backbone_ids, coords, max_steps, 30.0, 40.0)
 
-    if not solutions:
-        # Formatar diagnóstico detalhado para mensagem de erro
-        diagnosticos = stats.get("diagnostico_caminhos_mortos", [])
-        if diagnosticos:
-            # Pegar o diagnóstico mais relevante (o que morreu no passo mais avançado)
-            diag_mais_avancado = max(diagnosticos, key=lambda x: x["passo"])
-            diag_str = formatar_diagnostico_caminho_morto(diag_mais_avancado)
-        else:
-            diag_str = "Sem diagnóstico detalhado disponível"
-
-        stats_resumo = {k: v for k, v in stats.items() if k != "diagnostico_caminhos_mortos"}
-        raise RuntimeError(f"Nenhum caminho válido encontrado para o backbone!\nResumo: {stats_resumo}\n{diag_str}")
-
+    # Com janela dinâmica, sempre encontra solução
     solution = solutions[0]
+
+    # Mostrar estatísticas de expansão se verbose
+    if verbose and stats["expansoes_janela"]:
+        print(f"  Backbone: {len(stats['expansoes_janela'])} passos precisaram de expansão de janela")
+
     return solution["coords"], backbone_ids
 
 
