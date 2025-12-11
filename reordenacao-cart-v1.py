@@ -49,6 +49,23 @@ def angle(a: Dict, b: Dict, c: Dict) -> float:
     return math.degrees(math.acos(cosang))
 
 
+def angle_tuple(p1: Tuple[float, float, float], p2: Tuple[float, float, float],
+                p3: Tuple[float, float, float]) -> float:
+    """
+    Calcula o ângulo em graus formado por três pontos (p1-p2-p3).
+    O ângulo é medido no vértice p2.
+    """
+    v1 = (p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2])
+    v2 = (p3[0] - p2[0], p3[1] - p2[1], p3[2] - p2[2])
+    n1 = math.sqrt(sum(v*v for v in v1))
+    n2 = math.sqrt(sum(v*v for v in v2))
+    if n1 < 1e-6 or n2 < 1e-6:
+        return 0.0
+    dot = sum(v1[i]*v2[i] for i in range(3))
+    cosang = max(-1.0, min(1.0, dot/(n1*n2)))
+    return math.degrees(math.acos(cosang))
+
+
 def same_coords(a: Dict, b: Dict, tol: float = 1e-3) -> bool:
     return (
         abs(a['x'] - b['x']) < tol and
@@ -409,94 +426,229 @@ def escolher_pesado_com_angulo(atoms: List[Dict], locked: Set[int], idx_center: 
 # SEÇÃO 7: FASE 1 - RECONSTRUÇÃO DO BACKBONE (DFS)
 # ==============================================================================
 
+def get_backbone_ideal_angle(prev_name: str, curr_name: str, next_name: str) -> float:
+    """
+    Retorna o ângulo ideal (em graus) para a sequência de átomos do backbone.
+
+    Ângulos típicos do backbone:
+    - N-CA-C:  ~111° (carbono alfa tetraédrico)
+    - CA-C-N:  ~116° (ligação peptídica planar)
+    - C-N-CA:  ~121° (ligação peptídica planar)
+    """
+    triplet = (prev_name, curr_name, next_name)
+
+    # Mapeamento de ângulos ideais para diferentes sequências
+    angles = {
+        ("N", "CA", "C"): 111.0,
+        ("CA", "C", "N"): 116.0,
+        ("C", "N", "CA"): 121.0,
+    }
+
+    return angles.get(triplet, 110.0)  # Default para 110° se não encontrado
+
+
+def find_candidates_dynamic_window(
+    all_serials: List[int],
+    locked: Set[int],
+    coords: Dict[int, Tuple[float, float, float]],
+    curr_coord: Tuple[float, float, float],
+    prev_coord: Optional[Tuple[float, float, float]],
+    d_min_base: float,
+    d_max_base: float,
+    ideal_angle: float,
+    delta: float = 0.01,
+    max_expansions: int = 50
+) -> Tuple[List[Tuple[int, float]], float, float, int]:
+    """
+    Busca candidatos com janela dinâmica de distância.
+
+    Se nenhum candidato for encontrado na janela inicial, expande a janela
+    em passos de ±delta até encontrar candidatos ou atingir max_expansions.
+
+    Args:
+        all_serials: Lista de todos os seriais de átomos
+        locked: Conjunto de seriais já utilizados
+        coords: Dicionário de coordenadas atuais
+        curr_coord: Coordenada do átomo atual
+        prev_coord: Coordenada do átomo anterior (para cálculo de ângulo)
+        d_min_base: Distância mínima inicial
+        d_max_base: Distância máxima inicial
+        ideal_angle: Ângulo ideal para refinamento
+        delta: Incremento de expansão da janela (default: 0.01 Å)
+        max_expansions: Número máximo de expansões permitidas
+
+    Returns:
+        Tupla (candidatos, d_min_final, d_max_final, num_expansoes)
+        candidatos: Lista de tuplas (serial, distância)
+    """
+    d_min = d_min_base
+    d_max = d_max_base
+    num_expansoes = 0
+
+    while num_expansoes <= max_expansions:
+        candidatos = []
+
+        for cand_id in all_serials:
+            if cand_id in locked:
+                continue
+            cand_coord = coords[cand_id]
+            d = dist_tuple(curr_coord, cand_coord)
+            if d_min <= d <= d_max:
+                candidatos.append((cand_id, d))
+
+        if candidatos:
+            # Se encontrou candidatos, ordenar por critério
+            if len(candidatos) == 1:
+                return candidatos, d_min, d_max, num_expansoes
+
+            # Múltiplos candidatos: aplicar refinamento angular
+            if prev_coord is not None:
+                # Calcular ângulo para cada candidato e escolher o mais próximo do ideal
+                candidatos_com_angulo = []
+                for cand_id, d in candidatos:
+                    cand_coord = coords[cand_id]
+                    ang = angle_tuple(prev_coord, curr_coord, cand_coord)
+                    diff_angulo = abs(ang - ideal_angle)
+                    candidatos_com_angulo.append((cand_id, d, ang, diff_angulo))
+
+                # Ordenar por diferença de ângulo (menor primeiro)
+                candidatos_com_angulo.sort(key=lambda x: x[3])
+
+                # Retornar todos os candidatos ordenados pelo melhor ângulo
+                candidatos = [(c[0], c[1]) for c in candidatos_com_angulo]
+
+            return candidatos, d_min, d_max, num_expansoes
+
+        # Expandir janela
+        d_min = max(0.5, d_min - delta)  # Não deixar menor que 0.5 Å
+        d_max = d_max + delta
+        num_expansoes += 1
+
+    # Não encontrou candidatos mesmo após max_expansions
+    return [], d_min, d_max, num_expansoes
+
+
 def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                             backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
                             max_steps: int = 23, min_total: float = 30.0,
-                            max_total: float = 40.0) -> Tuple[List[Dict], Dict]:
+                            max_total: float = 40.0,
+                            delta: float = 0.01,
+                            max_expansions: int = 50) -> Tuple[List[Dict], Dict]:
+    """
+    Encontra caminho válido para o backbone usando janela dinâmica de distância.
+
+    A janela de distância é expandida em passos de ±delta quando nenhum candidato
+    é encontrado. Se múltiplos candidatos são encontrados, o refinamento angular
+    é usado para selecionar o melhor.
+
+    Args:
+        atoms: Lista de átomos
+        atom_by_serial: Dicionário de átomos por serial
+        backbone_ids: Sequência canônica de IDs do backbone
+        coords: Coordenadas atuais
+        max_steps: Número máximo de passos (default: 23)
+        min_total: Distância total mínima aceitável
+        max_total: Distância total máxima aceitável
+        delta: Incremento de expansão da janela (default: 0.01 Å)
+        max_expansions: Número máximo de expansões da janela
+
+    Returns:
+        Tupla (solutions, stats)
+    """
     all_serials = [a['serial'] for a in atoms]
     L = len(backbone_ids)
     if L - 1 != max_steps:
         raise ValueError(f"Número de passos ({L-1}) não bate com max_steps={max_steps}.")
 
     start_id = backbone_ids[0]
-    stats = {"caminhos_estouraram_23_passos": 0, "caminhos_passaram_40A_antes_23": 0,
-             "caminhos_chegaram_alvo_23_menor_30A": 0, "caminhos_chegaram_alvo_23_entre_30e40A": 0,
-             "caminhos_mortos_sem_candidato": 0, "diagnostico_caminhos_mortos": []}
-    solutions = []
-    inicial = {"step": 0, "coords": coords.copy(), "locked": {start_id}, "total": 0.0, "edges": []}
-    stack = [inicial]
+    stats = {
+        "caminhos_estouraram_23_passos": 0,
+        "caminhos_passaram_40A_antes_23": 0,
+        "caminhos_chegaram_alvo_23_menor_30A": 0,
+        "caminhos_chegaram_alvo_23_entre_30e40A": 0,
+        "caminhos_mortos_sem_candidato": 0,
+        "diagnostico_caminhos_mortos": [],
+        "expansoes_janela": []  # Registrar quando janela foi expandida
+    }
 
-    while stack:
-        state = stack.pop()
-        k = state["step"]
-        total = state["total"]
+    # Abordagem greedy com janela dinâmica
+    current_coords = coords.copy()
+    locked = {start_id}
+    total_dist = 0.0
+    edges = []
 
-        if k == max_steps:
-            if total < min_total:
-                stats["caminhos_chegaram_alvo_23_menor_30A"] += 1
-            elif total <= max_total:
-                stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
-                solutions.append(state)
-                return solutions, stats
-            else:
-                stats["caminhos_passaram_40A_antes_23"] += 1
-            continue
-
+    for k in range(max_steps):
         curr_id = backbone_ids[k]
         next_id = backbone_ids[k + 1]
         curr_atom = atom_by_serial[curr_id]
         next_atom = atom_by_serial[next_id]
+
+        # Obter limites de distância para este par de átomos
         limits = bond_limits_backbone(curr_atom['name'], next_atom['name'])
         if limits is None:
             raise ValueError(f"Par de backbone inesperado: {curr_atom['name']}-{next_atom['name']}")
-        d_min, d_max = limits
-        curr_coord = state["coords"][curr_id]
-        found_candidate = False
+        d_min_base, d_max_base = limits
+        curr_coord = current_coords[curr_id]
 
-        for cand_id in all_serials:
-            if cand_id in state["locked"]:
-                continue
-            cand_coord = state["coords"][cand_id]
-            d = dist_tuple(curr_coord, cand_coord)
-            if d < d_min or d > d_max:
-                continue
-            found_candidate = True
-            new_coords = state["coords"].copy()
-            if cand_id != next_id:
-                tmp = new_coords[next_id]
-                new_coords[next_id] = new_coords[cand_id]
-                new_coords[cand_id] = tmp
-            new_total = total + d
-            new_step = k + 1
-            if new_total > max_total and new_step < max_steps:
-                stats["caminhos_passaram_40A_antes_23"] += 1
-                continue
-            new_locked = set(state["locked"])
-            new_locked.add(next_id)
-            new_edges = list(state["edges"])
-            new_edges.append({"from": curr_id, "to": next_id, "donor": cand_id, "distance": d})
-            new_state = {"step": new_step, "coords": new_coords, "locked": new_locked, "total": new_total, "edges": new_edges}
-            stack.append(new_state)
+        # Obter coordenada anterior para cálculo de ângulo (se existir)
+        prev_coord = None
+        prev_name = None
+        if k > 0:
+            prev_id = backbone_ids[k - 1]
+            prev_coord = current_coords[prev_id]
+            prev_name = atom_by_serial[prev_id]['name']
 
-        if not found_candidate:
+        # Calcular ângulo ideal para refinamento
+        if prev_name:
+            ideal_angle = get_backbone_ideal_angle(prev_name, curr_atom['name'], next_atom['name'])
+        else:
+            ideal_angle = 110.0  # Default para primeiro passo
+
+        # Buscar candidatos com janela dinâmica
+        candidatos, d_min_final, d_max_final, num_expansoes = find_candidates_dynamic_window(
+            all_serials=all_serials,
+            locked=locked,
+            coords=current_coords,
+            curr_coord=curr_coord,
+            prev_coord=prev_coord,
+            d_min_base=d_min_base,
+            d_max_base=d_max_base,
+            ideal_angle=ideal_angle,
+            delta=delta,
+            max_expansions=max_expansions
+        )
+
+        # Registrar expansão se ocorreu
+        if num_expansoes > 0:
+            stats["expansoes_janela"].append({
+                "passo": k,
+                "atomo_atual": f"{curr_atom['name']} ({curr_id})",
+                "atomo_proximo": f"{next_atom['name']} ({next_id})",
+                "janela_original": f"{d_min_base:.3f}-{d_max_base:.3f}",
+                "janela_expandida": f"{d_min_final:.3f}-{d_max_final:.3f}",
+                "expansoes": num_expansoes
+            })
+
+        if not candidatos:
+            # Não encontrou candidatos mesmo após expansão máxima
             stats["caminhos_mortos_sem_candidato"] += 1
-            # Coletar diagnóstico detalhado sobre por que o caminho morreu
+
+            # Coletar diagnóstico detalhado
             vizinhos_info = []
             for cand_id in all_serials:
-                if cand_id in state["locked"]:
+                if cand_id in locked:
                     continue
-                cand_coord = state["coords"][cand_id]
+                cand_coord = current_coords[cand_id]
                 d = dist_tuple(curr_coord, cand_coord)
                 cand_atom = atom_by_serial.get(cand_id, {})
                 vizinhos_info.append({
                     "serial": cand_id,
                     "nome": cand_atom.get("name", "?"),
-                    "residuo": cand_atom.get("resName", "?"),
-                    "res_seq": cand_atom.get("resSeq", "?"),
+                    "residuo": cand_atom.get("resname", "?"),
+                    "res_seq": cand_atom.get("resseq", "?"),
                     "distancia": round(d, 4),
-                    "status": "MUITO_PERTO" if d < d_min else ("MUITO_LONGE" if d > d_max else "OK")
+                    "status": "MUITO_PERTO" if d < d_min_final else ("MUITO_LONGE" if d > d_max_final else "OK")
                 })
-            # Ordenar por distância e pegar os 10 mais próximos
             vizinhos_info.sort(key=lambda x: x["distancia"])
             vizinhos_proximos = vizinhos_info[:10]
 
@@ -506,24 +658,64 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                 "atomo_atual": {
                     "serial": curr_id,
                     "nome": curr_atom["name"],
-                    "residuo": curr_atom["resName"],
-                    "res_seq": curr_atom["resSeq"]
+                    "residuo": curr_atom["resname"],
+                    "res_seq": curr_atom["resseq"]
                 },
                 "atomo_proximo_esperado": {
                     "serial": next_id,
                     "nome": next_atom["name"],
-                    "residuo": next_atom["resName"],
-                    "res_seq": next_atom["resSeq"]
+                    "residuo": next_atom["resname"],
+                    "res_seq": next_atom["resseq"]
                 },
-                "janela_distancia": {"min": d_min, "max": d_max},
-                "atomos_travados": len(state["locked"]),
-                "atomos_nao_travados": len(all_serials) - len(state["locked"]),
+                "janela_distancia": {"min": d_min_base, "max": d_max_base},
+                "janela_expandida": {"min": d_min_final, "max": d_max_final},
+                "expansoes_realizadas": num_expansoes,
+                "atomos_travados": len(locked),
+                "atomos_nao_travados": len(all_serials) - len(locked),
                 "vizinhos_mais_proximos": vizinhos_proximos,
-                "caminho_percorrido": state["edges"][-3:] if state["edges"] else []  # últimos 3 passos
+                "caminho_percorrido": edges[-3:] if edges else []
             }
             stats["diagnostico_caminhos_mortos"].append(diagnostico)
+            return [], stats
 
-    return solutions, stats
+        # Selecionar o melhor candidato (primeiro da lista ordenada)
+        best_cand_id, best_dist = candidatos[0]
+
+        # Fazer a troca de coordenadas se necessário
+        if best_cand_id != next_id:
+            tmp = current_coords[next_id]
+            current_coords[next_id] = current_coords[best_cand_id]
+            current_coords[best_cand_id] = tmp
+
+        # Atualizar estado
+        total_dist += best_dist
+        locked.add(next_id)
+        edges.append({
+            "from": curr_id,
+            "to": next_id,
+            "donor": best_cand_id,
+            "distance": best_dist,
+            "janela_expandida": num_expansoes > 0
+        })
+
+    # Caminho completo - verificar distância total
+    if total_dist < min_total:
+        stats["caminhos_chegaram_alvo_23_menor_30A"] += 1
+    elif total_dist <= max_total:
+        stats["caminhos_chegaram_alvo_23_entre_30e40A"] += 1
+    else:
+        stats["caminhos_passaram_40A_antes_23"] += 1
+
+    # Criar solução
+    solution = {
+        "step": max_steps,
+        "coords": current_coords,
+        "locked": locked,
+        "total": total_dist,
+        "edges": edges
+    }
+
+    return [solution], stats
 
 
 def formatar_diagnostico_caminho_morto(diag: dict) -> str:
@@ -544,7 +736,14 @@ def formatar_diagnostico_caminho_morto(diag: dict) -> str:
 
     # Janela de distância
     janela = diag['janela_distancia']
-    lines.append(f"\nJanela de distância:   {janela['min']:.2f} - {janela['max']:.2f} Å")
+    lines.append(f"\nJanela de distância original: {janela['min']:.3f} - {janela['max']:.3f} Å")
+
+    # Janela expandida (se aplicável)
+    if 'janela_expandida' in diag:
+        janela_exp = diag['janela_expandida']
+        expansoes = diag.get('expansoes_realizadas', 0)
+        lines.append(f"Janela após expansão:         {janela_exp['min']:.3f} - {janela_exp['max']:.3f} Å")
+        lines.append(f"Número de expansões:          {expansoes} (max: 50)")
 
     # Status de átomos
     lines.append(f"\nÁtomos já usados (travados): {diag['atomos_travados']}")
