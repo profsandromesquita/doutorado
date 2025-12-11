@@ -491,8 +491,8 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                 vizinhos_info.append({
                     "serial": cand_id,
                     "nome": cand_atom.get("name", "?"),
-                    "residuo": cand_atom.get("resName", "?"),
-                    "res_seq": cand_atom.get("resSeq", "?"),
+                    "residuo": cand_atom.get("resname", "?"),
+                    "res_seq": cand_atom.get("resseq", "?"),
                     "distancia": round(d, 4),
                     "status": "MUITO_PERTO" if d < d_min else ("MUITO_LONGE" if d > d_max else "OK")
                 })
@@ -506,14 +506,14 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                 "atomo_atual": {
                     "serial": curr_id,
                     "nome": curr_atom["name"],
-                    "residuo": curr_atom["resName"],
-                    "res_seq": curr_atom["resSeq"]
+                    "residuo": curr_atom["resname"],
+                    "res_seq": curr_atom["resseq"]
                 },
                 "atomo_proximo_esperado": {
                     "serial": next_id,
                     "nome": next_atom["name"],
-                    "residuo": next_atom["resName"],
-                    "res_seq": next_atom["resSeq"]
+                    "residuo": next_atom["resname"],
+                    "res_seq": next_atom["resseq"]
                 },
                 "janela_distancia": {"min": d_min, "max": d_max},
                 "atomos_travados": len(state["locked"]),
