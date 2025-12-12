@@ -261,13 +261,21 @@ def get_backbone_residues(backbone_ids: List[int], atom_by_serial: Dict[int, Dic
 # ==============================================================================
 
 def bond_limits_backbone(name1: str, name2: str) -> Optional[Tuple[float, float]]:
+    """
+    Retorna os limites de distância (min, max) para ligações do backbone.
+
+    Limites ajustados:
+    - N-CA / CA-N: 1.30 - 1.60 Å
+    - CA-C / C-CA: 1.30 - 1.70 Å
+    - C-N / N-C:   1.15 - 1.45 Å
+    """
     pair = (name1, name2)
     if pair in (("N", "CA"), ("CA", "N")):
-        return (1.40, 1.60)
+        return (1.30, 1.60)
     if pair in (("CA", "C"), ("C", "CA")):
-        return (1.40, 1.70)
+        return (1.30, 1.70)
     if pair in (("C", "N"), ("N", "C")):
-        return (1.25, 1.45)
+        return (1.15, 1.45)
     return None
 
 
@@ -456,13 +464,14 @@ def find_candidates_dynamic_window(
     d_min_base: float,
     d_max_base: float,
     ideal_angle: float,
-    delta: float = 0.01
+    delta: float = 0.005
 ) -> Tuple[List[Tuple[int, float]], float, float, int]:
     """
     Busca candidatos com janela dinâmica de distância.
 
-    Se nenhum candidato for encontrado na janela inicial, expande a janela
-    em passos de ±delta até encontrar candidatos.
+    Se nenhum candidato for encontrado na janela inicial, expande APENAS
+    o limite máximo em passos de +delta até encontrar candidatos.
+    O limite mínimo permanece fixo.
 
     Args:
         all_serials: Lista de todos os seriais de átomos
@@ -470,16 +479,16 @@ def find_candidates_dynamic_window(
         coords: Dicionário de coordenadas atuais
         curr_coord: Coordenada do átomo atual
         prev_coord: Coordenada do átomo anterior (para cálculo de ângulo)
-        d_min_base: Distância mínima inicial
-        d_max_base: Distância máxima inicial
+        d_min_base: Distância mínima (FIXA, não é expandida)
+        d_max_base: Distância máxima inicial (será expandida se necessário)
         ideal_angle: Ângulo ideal para refinamento
-        delta: Incremento de expansão da janela (default: 0.01 Å)
+        delta: Incremento de expansão do máximo (default: 0.005 Å)
 
     Returns:
         Tupla (candidatos, d_min_final, d_max_final, num_expansoes)
         candidatos: Lista de tuplas (serial, distância)
     """
-    d_min = d_min_base
+    d_min = d_min_base  # Limite mínimo FIXO
     d_max = d_max_base
     num_expansoes = 0
 
@@ -517,8 +526,7 @@ def find_candidates_dynamic_window(
 
             return candidatos, d_min, d_max, num_expansoes
 
-        # Expandir janela
-        d_min = max(0.1, d_min - delta)  # Não deixar menor que 0.1 Å
+        # Expandir APENAS o limite máximo
         d_max = d_max + delta
         num_expansoes += 1
 
@@ -527,11 +535,12 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                             backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
                             max_steps: int = 23, min_total: float = 30.0,
                             max_total: float = 40.0,
-                            delta: float = 0.01) -> Tuple[List[Dict], Dict]:
+                            delta: float = 0.005) -> Tuple[List[Dict], Dict]:
     """
     Encontra caminho válido para o backbone usando janela dinâmica de distância.
 
-    A janela de distância é expandida em passos de ±delta até encontrar candidatos.
+    A janela de distância é expandida APENAS no limite MÁXIMO em passos de +delta
+    até encontrar candidatos. O limite mínimo permanece fixo.
     Se múltiplos candidatos são encontrados, o refinamento angular é usado para
     selecionar o melhor.
 
@@ -543,7 +552,7 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
         max_steps: Número máximo de passos (default: 23)
         min_total: Distância total mínima aceitável
         max_total: Distância total máxima aceitável
-        delta: Incremento de expansão da janela (default: 0.01 Å)
+        delta: Incremento de expansão do máximo (default: 0.005 Å)
 
     Returns:
         Tupla (solutions, stats)
@@ -723,8 +732,8 @@ def formatar_relatorio_expansoes(expansoes: List[Dict], frame_num: int = None) -
         jan_orig = exp['janela_original']
         jan_exp = exp['janela_expandida']
         lines.append(f"\nJanela original:  {jan_orig['min']:.3f} - {jan_orig['max']:.3f} Å")
-        lines.append(f"Janela expandida: {jan_exp['min']:.3f} - {jan_exp['max']:.3f} Å")
-        lines.append(f"Expansões necessárias: {exp['expansoes']} (delta: ±{exp['expansoes'] * 0.01:.2f} Å)")
+        lines.append(f"Janela expandida: {jan_orig['min']:.3f} - {jan_exp['max']:.3f} Å (mínimo fixo)")
+        lines.append(f"Expansões necessárias: {exp['expansoes']} (máximo +{exp['expansoes'] * 0.005:.3f} Å)")
 
         # Candidato encontrado
         cand = exp['candidato_encontrado']
