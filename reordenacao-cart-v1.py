@@ -464,14 +464,16 @@ def find_candidates_dynamic_window(
     d_min_base: float,
     d_max_base: float,
     ideal_angle: float,
-    delta: float = 0.005
+    delta: float = 0.02
 ) -> Tuple[List[Tuple[int, float]], float, float, int]:
     """
     Busca candidatos com janela dinâmica de distância.
 
-    Se nenhum candidato for encontrado na janela inicial, expande APENAS
-    o limite máximo em passos de +delta até encontrar candidatos.
-    O limite mínimo permanece fixo.
+    Lógica de expansão:
+    1. Primeiro tenta com limites originais
+    2. Se não encontrou, expande o máximo em +delta até 15 tentativas
+    3. Se ainda não encontrou, reduz o mínimo em -delta até 15 tentativas
+    4. Se ainda não encontrou, continua expandindo ambos indefinidamente
 
     Args:
         all_serials: Lista de todos os seriais de átomos
@@ -479,66 +481,88 @@ def find_candidates_dynamic_window(
         coords: Dicionário de coordenadas atuais
         curr_coord: Coordenada do átomo atual
         prev_coord: Coordenada do átomo anterior (para cálculo de ângulo)
-        d_min_base: Distância mínima (FIXA, não é expandida)
-        d_max_base: Distância máxima inicial (será expandida se necessário)
+        d_min_base: Distância mínima inicial (pode ser reduzida)
+        d_max_base: Distância máxima inicial (pode ser expandida)
         ideal_angle: Ângulo ideal para refinamento
-        delta: Incremento de expansão do máximo (default: 0.005 Å)
+        delta: Incremento de expansão (default: 0.02 Å)
 
     Returns:
         Tupla (candidatos, d_min_final, d_max_final, num_expansoes)
         candidatos: Lista de tuplas (serial, distância)
     """
-    d_min = d_min_base  # Limite mínimo FIXO
+    d_min = d_min_base
     d_max = d_max_base
     num_expansoes = 0
+    max_expansoes_por_direcao = 15
 
-    while True:
-        candidatos = []
-
+    def buscar_na_janela(d_min_busca, d_max_busca):
+        cands = []
         for cand_id in all_serials:
             if cand_id in locked:
                 continue
             cand_coord = coords[cand_id]
             d = dist_tuple(curr_coord, cand_coord)
-            if d_min <= d <= d_max:
-                candidatos.append((cand_id, d))
+            if d_min_busca <= d <= d_max_busca:
+                cands.append((cand_id, d))
+        return cands
 
-        if candidatos:
-            # Se encontrou candidatos, ordenar por critério
-            if len(candidatos) == 1:
-                return candidatos, d_min, d_max, num_expansoes
+    # 1. Tentar com limites originais
+    candidatos = buscar_na_janela(d_min, d_max)
 
-            # Múltiplos candidatos: aplicar refinamento angular
-            if prev_coord is not None:
-                # Calcular ângulo para cada candidato e escolher o mais próximo do ideal
-                candidatos_com_angulo = []
-                for cand_id, d in candidatos:
-                    cand_coord = coords[cand_id]
-                    ang = angle_tuple(prev_coord, curr_coord, cand_coord)
-                    diff_angulo = abs(ang - ideal_angle)
-                    candidatos_com_angulo.append((cand_id, d, ang, diff_angulo))
+    # 2. Se não encontrou, expandir MAX até max_expansoes_por_direcao tentativas
+    if not candidatos:
+        for _ in range(max_expansoes_por_direcao):
+            d_max += delta
+            num_expansoes += 1
+            candidatos = buscar_na_janela(d_min, d_max)
+            if candidatos:
+                break
 
-                # Ordenar por diferença de ângulo (menor primeiro)
-                candidatos_com_angulo.sort(key=lambda x: x[3])
+    # 3. Se ainda não encontrou, reduzir MIN até max_expansoes_por_direcao tentativas
+    if not candidatos:
+        for _ in range(max_expansoes_por_direcao):
+            d_min = max(0.0, d_min - delta)
+            num_expansoes += 1
+            candidatos = buscar_na_janela(d_min, d_max)
+            if candidatos:
+                break
 
-                # Retornar todos os candidatos ordenados pelo melhor ângulo
-                candidatos = [(c[0], c[1]) for c in candidatos_com_angulo]
-
-            return candidatos, d_min, d_max, num_expansoes
-
-        # Expandir APENAS o limite máximo
-        d_max = d_max + delta
+    # 4. Se AINDA não encontrou, continuar expandindo ambos indefinidamente
+    while not candidatos:
+        d_max += delta
+        d_min = max(0.0, d_min - delta)
         num_expansoes += 1
+        candidatos = buscar_na_janela(d_min, d_max)
+
+    # Aplicar refinamento angular se houver múltiplos candidatos
+    if len(candidatos) > 1 and prev_coord is not None:
+        candidatos_com_angulo = []
+        for cand_id, d in candidatos:
+            cand_coord = coords[cand_id]
+            ang = angle_tuple(prev_coord, curr_coord, cand_coord)
+            diff_angulo = abs(ang - ideal_angle)
+            candidatos_com_angulo.append((cand_id, d, ang, diff_angulo))
+
+        # Ordenar por diferença de ângulo (menor primeiro)
+        candidatos_com_angulo.sort(key=lambda x: x[3])
+        candidatos = [(c[0], c[1]) for c in candidatos_com_angulo]
+
+    return candidatos, d_min, d_max, num_expansoes
 
 
 def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                                  backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
-                                 max_steps: int = 23, delta: float = 0.005) -> Tuple[List[Dict], Dict]:
+                                 max_steps: int = 23, delta: float = 0.02) -> Tuple[List[Dict], Dict]:
     """
     Encontra caminho válido para o backbone usando DFS completo.
 
     Testa TODAS as possibilidades de candidatos em cada passo, usando backtracking
     para explorar diferentes combinações e encontrar a melhor solução global.
+
+    Lógica de expansão de janela:
+    1. Primeiro tenta com limites originais
+    2. Se não encontrou, expande o máximo em +delta até 15 tentativas
+    3. Se ainda não encontrou, reduz o mínimo em -delta até 15 tentativas
 
     Args:
         atoms: Lista de átomos
@@ -546,7 +570,7 @@ def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dic
         backbone_ids: Sequência canônica de IDs do backbone
         coords: Coordenadas atuais
         max_steps: Número máximo de passos (default: 23)
-        delta: Incremento de expansão do máximo (default: 0.005 Å)
+        delta: Incremento de expansão (default: 0.02 Å)
 
     Returns:
         Tupla (solutions, stats)
@@ -619,17 +643,22 @@ def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dic
             ideal_angle = get_backbone_ideal_angle(prev_name, curr_atom['name'], next_atom['name'])
 
         # Buscar TODOS os candidatos com expansão dinâmica
+        d_min_base = d_min  # Guardar limite mínimo original
         d_max = d_max_base
+        d_min_atual = d_min_base
         candidatos = []
         num_expansoes = 0
+        max_expansoes_por_direcao = 15  # Limite de tentativas por direção
 
-        while not candidatos:
+        # Função auxiliar para buscar candidatos na janela atual
+        def buscar_candidatos_na_janela(d_min_busca, d_max_busca):
+            cands = []
             for cand_id in all_serials:
                 if cand_id in state["locked"]:
                     continue
                 cand_coord = state["coords"][cand_id]
                 d = dist_tuple(curr_coord, cand_coord)
-                if d_min <= d <= d_max:
+                if d_min_busca <= d <= d_max_busca:
                     # Calcular desvio angular
                     if prev_coord is not None:
                         ang = angle_tuple(prev_coord, curr_coord, cand_coord)
@@ -637,11 +666,39 @@ def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dic
                     else:
                         ang = ideal_angle
                         angular_dev = 0.0
-                    candidatos.append((cand_id, d, ang, angular_dev))
+                    cands.append((cand_id, d, ang, angular_dev))
+            return cands
 
-            if not candidatos:
+        # 1. Tentar com limites originais
+        candidatos = buscar_candidatos_na_janela(d_min_atual, d_max)
+
+        # 2. Se não encontrou, expandir MAX até max_expansoes_por_direcao tentativas
+        if not candidatos:
+            for _ in range(max_expansoes_por_direcao):
                 d_max += delta
                 num_expansoes += 1
+                candidatos = buscar_candidatos_na_janela(d_min_atual, d_max)
+                if candidatos:
+                    break
+
+        # 3. Se ainda não encontrou, reduzir MIN até max_expansoes_por_direcao tentativas
+        if not candidatos:
+            for _ in range(max_expansoes_por_direcao):
+                d_min_atual = max(0.0, d_min_atual - delta)
+                num_expansoes += 1
+                candidatos = buscar_candidatos_na_janela(d_min_atual, d_max)
+                if candidatos:
+                    break
+
+        # 4. Se AINDA não encontrou, continuar expandindo ambos indefinidamente
+        while not candidatos:
+            d_max += delta
+            d_min_atual = max(0.0, d_min_atual - delta)
+            num_expansoes += 1
+            candidatos = buscar_candidatos_na_janela(d_min_atual, d_max)
+
+        # Atualizar d_min para o relatório de expansões
+        d_min = d_min_atual
 
         # Ordenar candidatos por desvio angular (melhor primeiro para eficiência)
         candidatos.sort(key=lambda x: x[3])
@@ -688,9 +745,11 @@ def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dic
                         "residuo": next_atom['resname'],
                         "res_seq": next_atom['resseq']
                     },
-                    "janela_original": {"min": d_min, "max": d_max_base},
+                    "janela_original": {"min": d_min_base, "max": d_max_base},
                     "janela_expandida": {"min": d_min, "max": d_max},
                     "expansoes": num_expansoes,
+                    "min_reduzido": d_min < d_min_base,
+                    "max_expandido": d_max > d_max_base,
                     "candidato_encontrado": {
                         "serial": cand_id,
                         "nome": atom_by_serial.get(cand_id, {}).get('name', '?'),
@@ -725,9 +784,14 @@ def find_all_backbone_paths(atoms: List[Dict], atom_by_serial: Dict[int, Dict],
                             backbone_ids: List[int], coords: Dict[int, Tuple[float, float, float]],
                             max_steps: int = 23, min_total: float = 30.0,
                             max_total: float = 40.0,
-                            delta: float = 0.005) -> Tuple[List[Dict], Dict]:
+                            delta: float = 0.02) -> Tuple[List[Dict], Dict]:
     """
     Wrapper que chama a busca DFS completa para o backbone.
+
+    Lógica de expansão de janela:
+    1. Primeiro tenta com limites originais
+    2. Se não encontrou, expande o máximo em +delta até 15 tentativas
+    3. Se ainda não encontrou, reduz o mínimo em -delta até 15 tentativas
     """
     solutions, stats = find_all_backbone_paths_dfs(
         atoms, atom_by_serial, backbone_ids, coords, max_steps, delta
@@ -790,8 +854,24 @@ def formatar_relatorio_expansoes(expansoes: List[Dict], frame_num: int = None) -
         jan_orig = exp['janela_original']
         jan_exp = exp['janela_expandida']
         lines.append(f"\nJanela original:  {jan_orig['min']:.3f} - {jan_orig['max']:.3f} Å")
-        lines.append(f"Janela expandida: {jan_orig['min']:.3f} - {jan_exp['max']:.3f} Å (mínimo fixo)")
-        lines.append(f"Expansões necessárias: {exp['expansoes']} (máximo +{exp['expansoes'] * 0.005:.3f} Å)")
+        lines.append(f"Janela expandida: {jan_exp['min']:.3f} - {jan_exp['max']:.3f} Å")
+        lines.append(f"Expansões necessárias: {exp['expansoes']}")
+
+        # Indicar tipo de expansão
+        min_reduzido = exp.get('min_reduzido', jan_exp['min'] < jan_orig['min'])
+        max_expandido = exp.get('max_expandido', jan_exp['max'] > jan_orig['max'])
+
+        if min_reduzido and max_expandido:
+            delta_min = jan_orig['min'] - jan_exp['min']
+            delta_max = jan_exp['max'] - jan_orig['max']
+            lines.append(f"  - Mínimo reduzido em: -{delta_min:.3f} Å")
+            lines.append(f"  - Máximo expandido em: +{delta_max:.3f} Å")
+        elif min_reduzido:
+            delta_min = jan_orig['min'] - jan_exp['min']
+            lines.append(f"  - Mínimo reduzido em: -{delta_min:.3f} Å")
+        elif max_expandido:
+            delta_max = jan_exp['max'] - jan_orig['max']
+            lines.append(f"  - Máximo expandido em: +{delta_max:.3f} Å")
 
         # Candidato encontrado
         cand = exp['candidato_encontrado']
