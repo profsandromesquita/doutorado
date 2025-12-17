@@ -190,6 +190,44 @@ def build_serial_index(atoms: List[Dict]) -> Dict[int, Dict]:
     return {a['serial']: a for a in atoms}
 
 
+def get_scope_serials(atoms: List[Dict], res_start: int, res_end: int, chain: str) -> List[int]:
+    """
+    Retorna lista de seriais dos átomos que estão dentro do escopo definido.
+
+    Args:
+        atoms: Lista de todos os átomos
+        res_start: Número do primeiro resíduo do escopo (ex: 576)
+        res_end: Número do último resíduo do escopo (ex: 583)
+        chain: Cadeia alvo (ex: "B")
+
+    Returns:
+        Lista de seriais dos átomos no escopo
+    """
+    return [
+        a['serial'] for a in atoms
+        if a['chain'] == chain and res_start <= a['resseq'] <= res_end
+    ]
+
+
+def get_scope_indices(atoms: List[Dict], res_start: int, res_end: int, chain: str) -> List[int]:
+    """
+    Retorna lista de índices dos átomos que estão dentro do escopo definido.
+
+    Args:
+        atoms: Lista de todos os átomos
+        res_start: Número do primeiro resíduo do escopo (ex: 576)
+        res_end: Número do último resíduo do escopo (ex: 583)
+        chain: Cadeia alvo (ex: "B")
+
+    Returns:
+        Lista de índices dos átomos no escopo
+    """
+    return [
+        i for i, a in enumerate(atoms)
+        if a['chain'] == chain and res_start <= a['resseq'] <= res_end
+    ]
+
+
 # ==============================================================================
 # SEÇÃO 4: CONSTRUÇÃO DO BACKBONE CANÔNICO
 # ==============================================================================
@@ -286,16 +324,27 @@ def bond_limits_backbone(name1: str, name2: str) -> Optional[Tuple[float, float]
 def escolher_vizinhos_dinamico(atoms: List[Dict], locked: Set[int], idx_ref: int,
                                 target_count: int, dmin_init: float, dmax_init: float,
                                 delta: float = 0.005, max_iter: int = 200,
-                                label: str = "H?") -> Tuple[List[int], float, float]:
+                                label: str = "H?", scope_indices: List[int] = None) -> Tuple[List[int], float, float]:
+    """
+    Busca vizinhos dinâmicos com restrição de escopo.
+
+    Args:
+        scope_indices: Se fornecido, restringe a busca apenas a estes índices.
+                      Se None, busca em todos os átomos (comportamento legado).
+    """
     ref = atoms[idx_ref]
     dmin = dmin_init
     dmax = dmax_init
 
+    # CORREÇÃO: Se scope_indices fornecido, usar apenas esses índices
+    indices_to_search = scope_indices if scope_indices is not None else range(len(atoms))
+
     for _ in range(max_iter):
         cand = []
-        for i, a in enumerate(atoms):
+        for i in indices_to_search:
             if i in locked or i == idx_ref:
                 continue
+            a = atoms[i]
             d = dist(ref, a)
             if dmin <= d <= dmax:
                 cand.append((i, d))
@@ -311,9 +360,10 @@ def escolher_vizinhos_dinamico(atoms: List[Dict], locked: Set[int], idx_ref: int
             dmax += delta
 
     cand_all = []
-    for i, a in enumerate(atoms):
+    for i in indices_to_search:
         if i in locked or i == idx_ref:
             continue
+        a = atoms[i]
         d = dist(ref, a)
         cand_all.append((i, d))
     cand_all.sort(key=lambda t: t[1])
@@ -324,10 +374,18 @@ def escolher_vizinhos_dinamico(atoms: List[Dict], locked: Set[int], idx_ref: int
 def atribuir_coord_alvos(atoms: List[Dict], locked: Set[int], idx_ref: int,
                          alvo_idxs: List[int], dmin_init: float, dmax_init: float,
                          target_count: int, delta: float = 0.005, max_iter: int = 200,
-                         label: str = "H?", verbose: bool = False) -> Dict:
+                         label: str = "H?", verbose: bool = False,
+                         scope_indices: List[int] = None) -> Dict:
+    """
+    Atribui coordenadas aos átomos alvo com restrição de escopo.
+
+    Args:
+        scope_indices: Se fornecido, restringe a busca apenas a estes índices.
+    """
     ref = atoms[idx_ref]
     cand_idxs, dmin_final, dmax_final = escolher_vizinhos_dinamico(
-        atoms, locked, idx_ref, target_count, dmin_init, dmax_init, delta, max_iter, label
+        atoms, locked, idx_ref, target_count, dmin_init, dmax_init, delta, max_iter, label,
+        scope_indices=scope_indices
     )
     cand_coords = {i: (atoms[i]['x'], atoms[i]['y'], atoms[i]['z']) for i in cand_idxs}
     used_cands = set()
@@ -383,7 +441,13 @@ def escolher_pesado_com_angulo(atoms: List[Dict], locked: Set[int], idx_center: 
                                 ang2_min: float = 104.0, ang2_max: float = 116.0, alvo_angulo: float = 110.0,
                                 label: str = "PESO", idx_angle_a: int = None, idx_angle_b: int = None,
                                 expand_distance: bool = False, delta: float = 0.005,
-                                max_iter: int = 200) -> Tuple[int, float, float]:
+                                max_iter: int = 200, scope_indices: List[int] = None) -> Tuple[int, float, float]:
+    """
+    Escolhe átomo pesado com critério de ângulo e restrição de escopo.
+
+    Args:
+        scope_indices: Se fornecido, restringe a busca apenas a estes índices.
+    """
     ref_dist = atoms[idx_center]
     if idx_angle_a is None:
         idx_angle_a = idx_prev
@@ -396,11 +460,15 @@ def escolher_pesado_com_angulo(atoms: List[Dict], locked: Set[int], idx_center: 
     dmax_cur = dmax
     candidatos = []
 
+    # CORREÇÃO: Se scope_indices fornecido, usar apenas esses índices
+    indices_to_search = scope_indices if scope_indices is not None else range(len(atoms))
+
     for iteration in range(max_iter if expand_distance else 1):
         candidatos = []
-        for i, a in enumerate(atoms):
+        for i in indices_to_search:
             if i in locked or i == idx_center:
                 continue
+            a = atoms[i]
             d = dist(ref_dist, a)
             if dmin_cur <= d <= dmax_cur:
                 ang = angle(ref_angle_a, ref_angle_b, a)
@@ -575,7 +643,16 @@ def find_all_backbone_paths_dfs(atoms: List[Dict], atom_by_serial: Dict[int, Dic
     Returns:
         Tupla (solutions, stats)
     """
-    all_serials = [a['serial'] for a in atoms]
+    # CORREÇÃO: Filtrar apenas átomos do escopo (576-583)
+    # Determinar escopo a partir do backbone_ids
+    start_atom = atom_by_serial[backbone_ids[0]]
+    end_atom = atom_by_serial[backbone_ids[-1]]
+    res_start = start_atom['resseq']
+    res_end = end_atom['resseq']
+    chain_alvo = start_atom['chain']
+
+    all_serials = get_scope_serials(atoms, res_start, res_end, chain_alvo)
+
     L = len(backbone_ids)
     if L - 1 != max_steps:
         raise ValueError(f"Número de passos ({L-1}) não bate com max_steps={max_steps}.")
@@ -924,7 +1001,15 @@ def fase1_backbone(atoms: List[Dict], coords: Dict[int, Tuple[float, float, floa
 def fase2_hn_ha_o(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
                   backbone_ids: List[int], verbose: bool = True) -> Dict[int, Tuple[float, float, float]]:
     atom_by_serial = {a['serial']: a for a in atoms}
-    all_serials = [a['serial'] for a in atoms]
+
+    # CORREÇÃO: Filtrar apenas átomos do escopo (576-583)
+    start_atom = atom_by_serial[backbone_ids[0]]
+    end_atom = atom_by_serial[backbone_ids[-1]]
+    res_start = start_atom['resseq']
+    res_end = end_atom['resseq']
+    chain_alvo = start_atom['chain']
+    all_serials = get_scope_serials(atoms, res_start, res_end, chain_alvo)
+
     backbone_set = set(backbone_ids)
     locked_sidechain = set()
 
@@ -985,7 +1070,15 @@ def fase2_hn_ha_o(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float
 def fase3_ca_cb(atoms: List[Dict], coords: Dict[int, Tuple[float, float, float]],
                 backbone_ids: List[int], locked: Set[int], verbose: bool = True) -> Tuple[Dict[int, Tuple[float, float, float]], Set[int]]:
     atom_by_serial = {a['serial']: a for a in atoms}
-    all_serials = [a['serial'] for a in atoms]
+
+    # CORREÇÃO: Filtrar apenas átomos do escopo (576-583)
+    start_atom = atom_by_serial[backbone_ids[0]]
+    end_atom = atom_by_serial[backbone_ids[-1]]
+    res_start = start_atom['resseq']
+    res_end = end_atom['resseq']
+    chain_alvo = start_atom['chain']
+    all_serials = get_scope_serials(atoms, res_start, res_end, chain_alvo)
+
     residues = get_backbone_residues(backbone_ids, atom_by_serial)
 
     for res in residues:
@@ -1097,7 +1190,9 @@ def inicializar_locked_base(atoms: List[Dict]) -> Set[int]:
 # SEÇÃO 11: PROCESSAMENTO DE CADEIAS LATERAIS POR RESÍDUO
 # ==============================================================================
 
-def processar_ile(atoms: List[Dict], locked: Set[int], resseq: int = 576, chain: str = "B", verbose: bool = True) -> None:
+def processar_ile(atoms: List[Dict], locked: Set[int], resseq: int = 576, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
+    """Processa cadeia lateral de ILE com restrição de escopo."""
     res_idxs = find_residue_atoms(atoms, "ILE", resseq, chain)
     if not res_idxs:
         return
@@ -1113,7 +1208,8 @@ def processar_ile(atoms: List[Dict], locked: Set[int], resseq: int = 576, chain:
     if idx_CG2 is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.65,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG2")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG2",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG2], atoms[cand_idx])
             locked.add(idx_CG2)
@@ -1122,12 +1218,14 @@ def processar_ile(atoms: List[Dict], locked: Set[int], resseq: int = 576, chain:
 
     alvo_hg2 = [name2idx.get(n) for n in ("1HG2", "2HG2", "3HG2") if name2idx.get(n) is not None]
     if alvo_hg2 and idx_CG2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG2, alvo_hg2, dmin_init=0.990, dmax_init=1.150, target_count=len(alvo_hg2), label="HG2")
+        atribuir_coord_alvos(atoms, locked, idx_CG2, alvo_hg2, dmin_init=0.990, dmax_init=1.150,
+                            target_count=len(alvo_hg2), label="HG2", scope_indices=scope_indices)
 
     if idx_CG1 is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.65,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG1")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG1",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG1], atoms[cand_idx])
             locked.add(idx_CG1)
@@ -1138,14 +1236,18 @@ def processar_ile(atoms: List[Dict], locked: Set[int], resseq: int = 576, chain:
     idx_2HG1 = name2idx.get("2HG1")
     alvo_cg1 = [x for x in [idx_1HG1, idx_2HG1, idx_CD] if x is not None]
     if alvo_cg1 and idx_CG1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG1, alvo_cg1, dmin_init=0.990, dmax_init=1.150, target_count=len(alvo_cg1), label="CG1_viz")
+        atribuir_coord_alvos(atoms, locked, idx_CG1, alvo_cg1, dmin_init=0.990, dmax_init=1.150,
+                            target_count=len(alvo_cg1), label="CG1_viz", scope_indices=scope_indices)
 
     alvo_hd = [name2idx.get(n) for n in ("HD1", "HD2", "HD3") if name2idx.get(n) is not None]
     if alvo_hd and idx_CD is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.990, dmax_init=1.150, target_count=len(alvo_hd), label="HD")
+        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.990, dmax_init=1.150,
+                            target_count=len(alvo_hd), label="HD", scope_indices=scope_indices)
 
 
-def processar_thr(atoms: List[Dict], locked: Set[int], resseq: int = 577, chain: str = "B", verbose: bool = True) -> None:
+def processar_thr(atoms: List[Dict], locked: Set[int], resseq: int = 577, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
+    """Processa cadeia lateral de THR com restrição de escopo."""
     res_idxs = find_residue_atoms(atoms, "THR", resseq, chain)
     if not res_idxs:
         return
@@ -1160,7 +1262,8 @@ def processar_thr(atoms: List[Dict], locked: Set[int], resseq: int = 577, chain:
     if idx_OG1 is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.30, dmax=1.50,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="OG1")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="OG1",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_OG1], atoms[cand_idx]):
                 swap_coords(atoms[idx_OG1], atoms[cand_idx])
             locked.add(idx_OG1)
@@ -1168,15 +1271,18 @@ def processar_thr(atoms: List[Dict], locked: Set[int], resseq: int = 577, chain:
             pass
 
     if idx_HG1 is not None and idx_OG1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_OG1, [idx_HG1], dmin_init=0.90, dmax_init=1.10, target_count=1, label="HG1")
+        atribuir_coord_alvos(atoms, locked, idx_OG1, [idx_HG1], dmin_init=0.90, dmax_init=1.10,
+                            target_count=1, label="HG1", scope_indices=scope_indices)
 
     if idx_HB is not None and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, [idx_HB], dmin_init=1.00, dmax_init=1.20, target_count=1, label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, [idx_HB], dmin_init=1.00, dmax_init=1.20,
+                            target_count=1, label="HB", scope_indices=scope_indices)
 
     if idx_CG2 is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.60,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG2")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG2",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG2], atoms[cand_idx])
             locked.add(idx_CG2)
@@ -1185,10 +1291,13 @@ def processar_thr(atoms: List[Dict], locked: Set[int], resseq: int = 577, chain:
 
     alvo_hg2 = [name2idx.get(n) for n in ("1HG2", "2HG2", "3HG2") if name2idx.get(n) is not None]
     if alvo_hg2 and idx_CG2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG2, alvo_hg2, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hg2), label="HG2")
+        atribuir_coord_alvos(atoms, locked, idx_CG2, alvo_hg2, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hg2), label="HG2", scope_indices=scope_indices)
 
 
-def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain: str = "B", verbose: bool = True) -> None:
+def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
+    """Processa cadeia lateral de LEU com restrição de escopo."""
     res_idxs = find_residue_atoms(atoms, "LEU", resseq, chain)
     if not res_idxs:
         return
@@ -1204,12 +1313,14 @@ def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain:
 
     alvo_hb = [x for x in [idx_HB1, idx_HB2] if x is not None]
     if alvo_hb and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hb), label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hb), label="HB", scope_indices=scope_indices)
 
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.60,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
             locked.add(idx_CG)
@@ -1217,13 +1328,14 @@ def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain:
             pass
 
     if idx_HG is not None and idx_CG is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG, [idx_HG], dmin_init=0.995, dmax_init=1.115, target_count=1, label="HG")
+        atribuir_coord_alvos(atoms, locked, idx_CG, [idx_HG], dmin_init=0.995, dmax_init=1.115,
+                            target_count=1, label="HG", scope_indices=scope_indices)
 
     if idx_CD1 is not None and idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CD1",
-                idx_angle_a=idx_CA, idx_angle_b=idx_CB)
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD1], atoms[cand_idx])
             locked.add(idx_CD1)
@@ -1234,7 +1346,7 @@ def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.40, dmax=1.60,
                 ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CD2",
-                idx_angle_a=idx_CA, idx_angle_b=idx_CB)
+                idx_angle_a=idx_CA, idx_angle_b=idx_CB, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD2], atoms[cand_idx])
             locked.add(idx_CD2)
@@ -1243,14 +1355,17 @@ def processar_leu(atoms: List[Dict], locked: Set[int], resseq: int = 578, chain:
 
     alvo_hd1 = [name2idx.get(n) for n in ("1HD1", "2HD1", "3HD1") if name2idx.get(n) is not None]
     if alvo_hd1 and idx_CD1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD1, alvo_hd1, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hd1), label="HD1")
+        atribuir_coord_alvos(atoms, locked, idx_CD1, alvo_hd1, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hd1), label="HD1", scope_indices=scope_indices)
 
     alvo_hd2 = [name2idx.get(n) for n in ("1HD2", "2HD2", "3HD2") if name2idx.get(n) is not None]
     if alvo_hd2 and idx_CD2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD2, alvo_hd2, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hd2), label="HD2")
+        atribuir_coord_alvos(atoms, locked, idx_CD2, alvo_hd2, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hd2), label="HD2", scope_indices=scope_indices)
 
 
-def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain: str = "B", verbose: bool = True) -> None:
+def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
     res_idxs = find_residue_atoms(atoms, "TYR", resseq, chain)
     if not res_idxs:
         return
@@ -1270,12 +1385,14 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
 
     alvo_hb = [x for x in [idx_HB1, idx_HB2] if x is not None]
     if alvo_hb and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hb), label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hb), label="HB", scope_indices=scope_indices)
 
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.60,
-                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG")
+                ang1_min=101.0, ang1_max=119.0, ang2_min=104.0, ang2_max=116.0, alvo_angulo=110.0, label="CG",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
             locked.add(idx_CG)
@@ -1285,7 +1402,8 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
     if idx_CD1 is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CD1")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CD1",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD1], atoms[cand_idx])
             locked.add(idx_CD1)
@@ -1294,12 +1412,14 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
 
     idx_HD1 = name2idx.get("HD1")
     if idx_HD1 is not None and idx_CD1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD1, [idx_HD1], dmin_init=0.995, dmax_init=1.115, target_count=1, label="HD1")
+        atribuir_coord_alvos(atoms, locked, idx_CD1, [idx_HD1], dmin_init=0.995, dmax_init=1.115,
+                            target_count=1, label="HD1", scope_indices=scope_indices)
 
     if idx_CD2 is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CD2")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CD2",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD2], atoms[cand_idx])
             locked.add(idx_CD2)
@@ -1308,12 +1428,14 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
 
     idx_HD2 = name2idx.get("HD2")
     if idx_HD2 is not None and idx_CD2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD2, [idx_HD2], dmin_init=0.995, dmax_init=1.115, target_count=1, label="HD2")
+        atribuir_coord_alvos(atoms, locked, idx_CD2, [idx_HD2], dmin_init=0.995, dmax_init=1.115,
+                            target_count=1, label="HD2", scope_indices=scope_indices)
 
     if idx_CE1 is not None and idx_CD1 is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CD1, idx_CG, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CE1")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CE1",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CE1], atoms[cand_idx]):
                 swap_coords(atoms[idx_CE1], atoms[cand_idx])
             locked.add(idx_CE1)
@@ -1322,12 +1444,14 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
 
     idx_HE1 = name2idx.get("HE1")
     if idx_HE1 is not None and idx_CE1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CE1, [idx_HE1], dmin_init=0.995, dmax_init=1.115, target_count=1, label="HE1")
+        atribuir_coord_alvos(atoms, locked, idx_CE1, [idx_HE1], dmin_init=0.995, dmax_init=1.115,
+                            target_count=1, label="HE1", scope_indices=scope_indices)
 
     if idx_CE2 is not None and idx_CD2 is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CD2, idx_CG, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CE2")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CE2",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CE2], atoms[cand_idx]):
                 swap_coords(atoms[idx_CE2], atoms[cand_idx])
             locked.add(idx_CE2)
@@ -1336,12 +1460,14 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
 
     idx_HE2 = name2idx.get("HE2")
     if idx_HE2 is not None and idx_CE2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CE2, [idx_HE2], dmin_init=0.995, dmax_init=1.115, target_count=1, label="HE2")
+        atribuir_coord_alvos(atoms, locked, idx_CE2, [idx_HE2], dmin_init=0.995, dmax_init=1.115,
+                            target_count=1, label="HE2", scope_indices=scope_indices)
 
     if idx_CZ is not None and idx_CE1 is not None and idx_CD1 is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CE1, idx_CD1, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CZ")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="CZ",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_CZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_CZ], atoms[cand_idx])
             locked.add(idx_CZ)
@@ -1351,7 +1477,8 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
     if idx_OH is not None and idx_CZ is not None and idx_CE1 is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CZ, idx_CE1, dmin=1.30, dmax=1.50,
-                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="OH")
+                ang1_min=114.0, ang1_max=126.0, ang2_min=117.0, ang2_max=123.0, alvo_angulo=120.0, label="OH",
+                scope_indices=scope_indices)
             if not same_coords(atoms[idx_OH], atoms[cand_idx]):
                 swap_coords(atoms[idx_OH], atoms[cand_idx])
             locked.add(idx_OH)
@@ -1359,10 +1486,12 @@ def processar_tyr(atoms: List[Dict], locked: Set[int], resseq: int = 579, chain:
             pass
 
     if idx_HH is not None and idx_OH is not None:
-        atribuir_coord_alvos(atoms, locked, idx_OH, [idx_HH], dmin_init=0.85, dmax_init=1.05, target_count=1, label="HH")
+        atribuir_coord_alvos(atoms, locked, idx_OH, [idx_HH], dmin_init=0.85, dmax_init=1.05,
+                            target_count=1, label="HH", scope_indices=scope_indices)
 
 
-def processar_cys(atoms: List[Dict], locked: Set[int], resseq: int = 580, chain: str = "B", verbose: bool = True) -> None:
+def processar_cys(atoms: List[Dict], locked: Set[int], resseq: int = 580, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
     res_idxs = find_residue_atoms(atoms, "CYS", resseq, chain)
     if not res_idxs:
         return
@@ -1376,13 +1505,14 @@ def processar_cys(atoms: List[Dict], locked: Set[int], resseq: int = 580, chain:
 
     alvo_hb = [x for x in [idx_HB1, idx_HB2] if x is not None]
     if alvo_hb and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hb), label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hb), label="HB", scope_indices=scope_indices)
 
     if idx_SG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.60, dmax=1.90,
                 ang1_min=100.0, ang1_max=125.0, ang2_min=104.0, ang2_max=121.0, alvo_angulo=112.5, label="SG",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_SG], atoms[cand_idx]):
                 swap_coords(atoms[idx_SG], atoms[cand_idx])
             locked.add(idx_SG)
@@ -1390,10 +1520,12 @@ def processar_cys(atoms: List[Dict], locked: Set[int], resseq: int = 580, chain:
             pass
 
     if idx_HG1 is not None and idx_SG is not None:
-        atribuir_coord_alvos(atoms, locked, idx_SG, [idx_HG1], dmin_init=1.20, dmax_init=1.45, target_count=1, label="HG1")
+        atribuir_coord_alvos(atoms, locked, idx_SG, [idx_HG1], dmin_init=1.20, dmax_init=1.45,
+                            target_count=1, label="HG1", scope_indices=scope_indices)
 
 
-def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain: str = "B", verbose: bool = True) -> None:
+def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
     res_idxs = find_residue_atoms(atoms, "LYS", resseq, chain)
     if not res_idxs:
         return
@@ -1409,13 +1541,14 @@ def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain:
     idx_HB2 = name2idx.get("HB2")
     alvo_hb = [x for x in [idx_HB1, idx_HB2] if x is not None]
     if alvo_hb and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hb), label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hb), label="HB", scope_indices=scope_indices)
 
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0, ang2_min=103.0, ang2_max=124.0, alvo_angulo=113.6, label="CG",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
             locked.add(idx_CG)
@@ -1426,13 +1559,14 @@ def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain:
     idx_HG2 = name2idx.get("HG2")
     alvo_hg = [x for x in [idx_HG1, idx_HG2] if x is not None]
     if alvo_hg and idx_CG is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG, alvo_hg, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hg), label="HG")
+        atribuir_coord_alvos(atoms, locked, idx_CG, alvo_hg, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hg), label="HG", scope_indices=scope_indices)
 
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0, ang2_min=103.0, ang2_max=124.0, alvo_angulo=113.6, label="CD",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
             locked.add(idx_CD)
@@ -1443,13 +1577,14 @@ def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain:
     idx_HD2 = name2idx.get("HD2")
     alvo_hd = [x for x in [idx_HD1, idx_HD2] if x is not None]
     if alvo_hd and idx_CD is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hd), label="HD")
+        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hd), label="HD", scope_indices=scope_indices)
 
     if idx_CE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CD, idx_CG, dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0, ang2_min=103.0, ang2_max=124.0, alvo_angulo=113.6, label="CE",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CE], atoms[cand_idx]):
                 swap_coords(atoms[idx_CE], atoms[cand_idx])
             locked.add(idx_CE)
@@ -1460,13 +1595,14 @@ def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain:
     idx_HE2 = name2idx.get("HE2")
     alvo_he = [x for x in [idx_HE1, idx_HE2] if x is not None]
     if alvo_he and idx_CE is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CE, alvo_he, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_he), label="HE")
+        atribuir_coord_alvos(atoms, locked, idx_CE, alvo_he, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_he), label="HE", scope_indices=scope_indices)
 
     if idx_NZ is not None and idx_CE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CE, idx_CD, dmin=1.38, dmax=1.58,
                 ang1_min=95.0, ang1_max=125.0, ang2_min=100.0, ang2_max=120.0, alvo_angulo=110.0, label="NZ",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_NZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_NZ], atoms[cand_idx])
             locked.add(idx_NZ)
@@ -1478,10 +1614,12 @@ def processar_lys(atoms: List[Dict], locked: Set[int], resseq: int = 581, chain:
     idx_HZ3 = name2idx.get("HZ3")
     alvo_hz = [x for x in [idx_HZ1, idx_HZ2, idx_HZ3] if x is not None]
     if alvo_hz and idx_NZ is not None:
-        atribuir_coord_alvos(atoms, locked, idx_NZ, alvo_hz, dmin_init=0.90, dmax_init=1.10, target_count=len(alvo_hz), label="HZ")
+        atribuir_coord_alvos(atoms, locked, idx_NZ, alvo_hz, dmin_init=0.90, dmax_init=1.10,
+                            target_count=len(alvo_hz), label="HZ", scope_indices=scope_indices)
 
 
-def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain: str = "B", verbose: bool = True) -> None:
+def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain: str = "B",
+                  verbose: bool = True, scope_indices: List[int] = None) -> None:
     res_idxs = find_residue_atoms(atoms, "ARG", resseq, chain)
     if not res_idxs:
         return
@@ -1499,13 +1637,14 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
     idx_HB2 = name2idx.get("HB2")
     alvo_hb = [x for x in [idx_HB1, idx_HB2] if x is not None]
     if alvo_hb and idx_CB is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hb), label="HB")
+        atribuir_coord_alvos(atoms, locked, idx_CB, alvo_hb, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hb), label="HB", scope_indices=scope_indices)
 
     if idx_CG is not None and idx_CB is not None and idx_CA is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CB, idx_CA, dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0, ang2_min=103.0, ang2_max=124.0, alvo_angulo=113.6, label="CG",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CG], atoms[cand_idx]):
                 swap_coords(atoms[idx_CG], atoms[cand_idx])
             locked.add(idx_CG)
@@ -1516,13 +1655,14 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
     idx_HG2 = name2idx.get("HG2")
     alvo_hg = [x for x in [idx_HG1, idx_HG2] if x is not None]
     if alvo_hg and idx_CG is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CG, alvo_hg, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hg), label="HG")
+        atribuir_coord_alvos(atoms, locked, idx_CG, alvo_hg, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hg), label="HG", scope_indices=scope_indices)
 
     if idx_CD is not None and idx_CG is not None and idx_CB is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CG, idx_CB, dmin=1.40, dmax=1.60,
                 ang1_min=100.0, ang1_max=127.0, ang2_min=103.0, ang2_max=124.0, alvo_angulo=113.6, label="CD",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CD], atoms[cand_idx]):
                 swap_coords(atoms[idx_CD], atoms[cand_idx])
             locked.add(idx_CD)
@@ -1533,13 +1673,14 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
     idx_HD2 = name2idx.get("HD2")
     alvo_hd = [x for x in [idx_HD1, idx_HD2] if x is not None]
     if alvo_hd and idx_CD is not None:
-        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.995, dmax_init=1.115, target_count=len(alvo_hd), label="HD")
+        atribuir_coord_alvos(atoms, locked, idx_CD, alvo_hd, dmin_init=0.995, dmax_init=1.115,
+                            target_count=len(alvo_hd), label="HD", scope_indices=scope_indices)
 
     if idx_NE is not None and idx_CD is not None and idx_CG is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CD, idx_CG, dmin=1.40, dmax=1.60,
                 ang1_min=103.0, ang1_max=133.0, ang2_min=108.0, ang2_max=128.0, alvo_angulo=118.0, label="NE",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_NE], atoms[cand_idx]):
                 swap_coords(atoms[idx_NE], atoms[cand_idx])
             locked.add(idx_NE)
@@ -1548,13 +1689,14 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
 
     idx_HE = name2idx.get("HE")
     if idx_HE is not None and idx_NE is not None:
-        atribuir_coord_alvos(atoms, locked, idx_NE, [idx_HE], dmin_init=0.90, dmax_init=1.10, target_count=1, label="HE")
+        atribuir_coord_alvos(atoms, locked, idx_NE, [idx_HE], dmin_init=0.90, dmax_init=1.10,
+                            target_count=1, label="HE", scope_indices=scope_indices)
 
     if idx_CZ is not None and idx_NE is not None and idx_CD is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_NE, idx_CD, dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0, ang2_min=114.0, ang2_max=126.0, alvo_angulo=120.0, label="CZ",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_CZ], atoms[cand_idx]):
                 swap_coords(atoms[idx_CZ], atoms[cand_idx])
             locked.add(idx_CZ)
@@ -1565,7 +1707,7 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CZ, idx_NE, dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0, ang2_min=114.0, ang2_max=126.0, alvo_angulo=120.0, label="NH1",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_NH1], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH1], atoms[cand_idx])
             locked.add(idx_NH1)
@@ -1576,13 +1718,14 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
     idx_2HH1 = name2idx.get("2HH1")
     alvo_hh1 = [x for x in [idx_1HH1, idx_2HH1] if x is not None]
     if alvo_hh1 and idx_NH1 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_NH1, alvo_hh1, dmin_init=0.90, dmax_init=1.10, target_count=len(alvo_hh1), label="HH1")
+        atribuir_coord_alvos(atoms, locked, idx_NH1, alvo_hh1, dmin_init=0.90, dmax_init=1.10,
+                            target_count=len(alvo_hh1), label="HH1", scope_indices=scope_indices)
 
     if idx_NH2 is not None and idx_CZ is not None and idx_NE is not None:
         try:
             cand_idx, d, ang = escolher_pesado_com_angulo(atoms, locked, idx_CZ, idx_NE, dmin=1.25, dmax=1.45,
                 ang1_min=100.0, ang1_max=130.0, ang2_min=114.0, ang2_max=126.0, alvo_angulo=120.0, label="NH2",
-                expand_distance=True, delta=0.005, max_iter=200)
+                expand_distance=True, delta=0.005, max_iter=200, scope_indices=scope_indices)
             if not same_coords(atoms[idx_NH2], atoms[cand_idx]):
                 swap_coords(atoms[idx_NH2], atoms[cand_idx])
             locked.add(idx_NH2)
@@ -1593,7 +1736,8 @@ def processar_arg(atoms: List[Dict], locked: Set[int], resseq: int = 582, chain:
     idx_2HH2 = name2idx.get("2HH2")
     alvo_hh2 = [x for x in [idx_1HH2, idx_2HH2] if x is not None]
     if alvo_hh2 and idx_NH2 is not None:
-        atribuir_coord_alvos(atoms, locked, idx_NH2, alvo_hh2, dmin_init=0.90, dmax_init=1.10, target_count=len(alvo_hh2), label="HH2")
+        atribuir_coord_alvos(atoms, locked, idx_NH2, alvo_hh2, dmin_init=0.90, dmax_init=1.10,
+                            target_count=len(alvo_hh2), label="HH2", scope_indices=scope_indices)
 
 
 # ==============================================================================
@@ -1647,25 +1791,28 @@ def processar_frame(frame_content: str, frame_num: int, start_serial: int = 8641
         # FASES 4-10: Cadeias laterais
         locked = inicializar_locked_base(atoms)
 
-        processar_ile(atoms, locked, resseq=576, chain=chain, verbose=False)
+        # CORREÇÃO: Calcular scope_indices para restringir buscas aos resíduos 576-583
+        scope_indices = get_scope_indices(atoms, 576, 583, chain)
+
+        processar_ile(atoms, locked, resseq=576, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "ILE", 576, chain)
 
-        processar_thr(atoms, locked, resseq=577, chain=chain, verbose=False)
+        processar_thr(atoms, locked, resseq=577, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "THR", 577, chain)
 
-        processar_leu(atoms, locked, resseq=578, chain=chain, verbose=False)
+        processar_leu(atoms, locked, resseq=578, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "LEU", 578, chain)
 
-        processar_tyr(atoms, locked, resseq=579, chain=chain, verbose=False)
+        processar_tyr(atoms, locked, resseq=579, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "TYR", 579, chain)
 
-        processar_cys(atoms, locked, resseq=580, chain=chain, verbose=False)
+        processar_cys(atoms, locked, resseq=580, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "CYS", 580, chain)
 
-        processar_lys(atoms, locked, resseq=581, chain=chain, verbose=False)
+        processar_lys(atoms, locked, resseq=581, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "LYS", 581, chain)
 
-        processar_arg(atoms, locked, resseq=582, chain=chain, verbose=False)
+        processar_arg(atoms, locked, resseq=582, chain=chain, verbose=False, scope_indices=scope_indices)
         bloquear_residuo(atoms, locked, "ARG", 582, chain)
 
         # Atualizar linhas
