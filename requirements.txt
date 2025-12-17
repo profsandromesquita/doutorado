@@ -1,0 +1,32 @@
+# =============================================================================
+# CAR-T Reorder Pipeline v2.0 - Dependências
+# =============================================================================
+#
+# Para executar o dashboard (interface gráfica):
+#   pip install -r requirements.txt
+#
+# Para gerar executável standalone:
+#   pip install pyinstaller
+#   python build_executavel.py
+#
+# =============================================================================
+
+# Dependências principais (já incluídas no Python padrão)
+# - tkinter: Interface gráfica (incluído no Python)
+# - math: Cálculos matemáticos (incluído no Python)
+# - threading: Multi-threading (incluído no Python)
+# - queue: Filas thread-safe (incluído no Python)
+
+# Para gerar executável (opcional)
+pyinstaller>=5.0
+
+# =============================================================================
+# NOTAS:
+#
+# - tkinter normalmente já vem instalado com Python no Windows
+# - No Linux (Ubuntu/Debian), pode ser necessário instalar:
+#   sudo apt-get install python3-tk
+#
+# - No macOS com Homebrew Python:
+#   brew install python-tk
+# =============================================================================
