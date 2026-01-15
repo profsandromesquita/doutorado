@@ -1,22 +1,42 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-PIPELINE UNIFICADO DE REORDENAÇÃO DE ESTRUTURA CAR-T - MULTI-FRAME (v2 CORRIGIDO)
+PIPELINE UNIFICADO DE REORDENAÇÃO DE ESTRUTURA CAR-T - MULTI-FRAME (v2.1)
 ================================================================================
 
 Versão que processa múltiplos frames de uma trajetória de dinâmica molecular.
-Cada frame é separado por TER/ENDMDL.
+Suporta arquivos PDB (frames separados por TER/ENDMDL) e XTC (trajetórias binárias).
 
 AUTOR: Pipeline consolidado automaticamente
 DATA: 2025
-VERSÃO: 2.0 - Correção da função fase3_ca_cb com expansão dinâmica de janela
+VERSÃO: 2.1 - Adicionado suporte a arquivos XTC (requer MDAnalysis)
+
+NOVIDADES v2.1:
+- Suporte a leitura e escrita de arquivos XTC
+- Detecção automática de tipo de arquivo pela extensão
+- Opção -t/--topology para especificar arquivo de topologia (PDB/GRO)
+- Dependência opcional: MDAnalysis (pip install MDAnalysis)
+
+CORREÇÕES v2.0:
+- Função fase3_ca_cb com expansão dinâmica de janela
+- Restrição de escopo para evitar violações de cadeia
+- Algoritmo DFS otimizado para reconstrução do backbone
 ================================================================================
 """
 
 import math
 import sys
+import os
 from typing import List, Dict, Set, Tuple, Optional, Any
 from collections import defaultdict
+
+# Tentar importar MDAnalysis para suporte a arquivos XTC
+try:
+    import MDAnalysis as mda
+    from MDAnalysis.coordinates.XTC import XTCWriter
+    HAS_MDANALYSIS = True
+except ImportError:
+    HAS_MDANALYSIS = False
 
 
 # ==============================================================================
@@ -155,6 +175,144 @@ def update_pdb_lines(lines: List[str], atoms: List[Dict]) -> List[str]:
         )
         lines[i] = new_line
     return lines
+
+
+# ==============================================================================
+# SEÇÃO 2B: FUNÇÕES DE PARSING E ESCRITA DE XTC
+# ==============================================================================
+
+def check_xtc_support() -> bool:
+    """Verifica se o suporte a XTC está disponível."""
+    if not HAS_MDANALYSIS:
+        print("ERRO: MDAnalysis não está instalado.")
+        print("Para suporte a arquivos XTC, instale com: pip install MDAnalysis")
+        return False
+    return True
+
+
+def load_xtc_universe(topology_file: str, trajectory_file: str) -> 'mda.Universe':
+    """
+    Carrega uma trajetória XTC com sua topologia.
+
+    Args:
+        topology_file: Arquivo de topologia (PDB, GRO, etc.)
+        trajectory_file: Arquivo de trajetória XTC
+
+    Returns:
+        Objeto Universe do MDAnalysis
+    """
+    if not check_xtc_support():
+        raise RuntimeError("MDAnalysis não disponível")
+
+    return mda.Universe(topology_file, trajectory_file)
+
+
+def xtc_frame_to_atoms(universe: 'mda.Universe') -> Tuple[List[Dict], List[str]]:
+    """
+    Converte o frame atual do Universe para o formato de átomos usado pelo script.
+
+    Args:
+        universe: Objeto Universe do MDAnalysis com frame já selecionado
+
+    Returns:
+        Tupla (lista de átomos no formato dict, linhas PDB simuladas)
+    """
+    atoms = []
+    lines = []
+
+    for i, atom in enumerate(universe.atoms):
+        # Obter coordenadas (MDAnalysis usa Angstroms)
+        x, y, z = atom.position
+
+        # Criar registro no formato esperado
+        rec = {
+            'line_idx': i,
+            'serial': atom.id if hasattr(atom, 'id') else i + 1,
+            'name': atom.name,
+            'altloc': '',
+            'resname': atom.resname,
+            'chain': atom.segid if hasattr(atom, 'segid') else (atom.chainID if hasattr(atom, 'chainID') else ''),
+            'resseq': atom.resid,
+            'icode': '',
+            'x': float(x),
+            'y': float(y),
+            'z': float(z),
+            'raw_line': ''  # Será gerado depois se necessário
+        }
+
+        # Gerar linha PDB simulada
+        line = generate_pdb_line(rec)
+        rec['raw_line'] = line
+
+        atoms.append(rec)
+        lines.append(line)
+
+    return atoms, lines
+
+
+def generate_pdb_line(atom: Dict) -> str:
+    """
+    Gera uma linha no formato PDB a partir de um dicionário de átomo.
+    """
+    record = "ATOM  "
+    serial = atom.get('serial', 1)
+    name = atom.get('name', 'X')
+    altloc = atom.get('altloc', '')
+    resname = atom.get('resname', 'UNK')
+    chain = atom.get('chain', '')
+    resseq = atom.get('resseq', 1)
+    icode = atom.get('icode', '')
+    x = atom.get('x', 0.0)
+    y = atom.get('y', 0.0)
+    z = atom.get('z', 0.0)
+
+    # Formatar nome do átomo (4 caracteres, alinhado à esquerda se começa com número)
+    if len(name) < 4:
+        if name[0].isdigit():
+            name_fmt = name.ljust(4)
+        else:
+            name_fmt = ' ' + name.ljust(3)
+    else:
+        name_fmt = name[:4]
+
+    line = (
+        f"{record}{serial:5d} {name_fmt}{altloc:1s}{resname:3s} {chain:1s}{resseq:4d}{icode:1s}   "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00"
+    )
+
+    return line
+
+
+def update_universe_coords(universe: 'mda.Universe', coords: Dict[int, Tuple[float, float, float]]) -> None:
+    """
+    Atualiza as coordenadas do Universe a partir do dicionário de coordenadas.
+
+    Args:
+        universe: Objeto Universe do MDAnalysis
+        coords: Dicionário serial -> (x, y, z)
+    """
+    for atom in universe.atoms:
+        serial = atom.id if hasattr(atom, 'id') else atom.index + 1
+        if serial in coords:
+            atom.position = coords[serial]
+
+
+def get_file_type(filename: str) -> str:
+    """
+    Determina o tipo de arquivo pela extensão.
+
+    Returns:
+        'pdb', 'xtc', ou 'unknown'
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == '.pdb':
+        return 'pdb'
+    elif ext == '.xtc':
+        return 'xtc'
+    elif ext == '.gro':
+        return 'gro'
+    else:
+        return 'unknown'
 
 
 # ==============================================================================
@@ -2020,26 +2178,253 @@ def executar_pipeline_multiframe(pdb_entrada: str, pdb_saida: str, start_serial:
 
 
 # ==============================================================================
+# SEÇÃO 13B: PIPELINE PRINCIPAL PARA ARQUIVOS XTC
+# ==============================================================================
+
+def executar_pipeline_xtc(topology_file: str, xtc_entrada: str, xtc_saida: str,
+                          start_serial: int = 8641, end_serial: int = 8776,
+                          chain: str = "B", verbose: bool = True) -> None:
+    """
+    Executa o pipeline completo para trajetórias em formato XTC.
+
+    Args:
+        topology_file: Arquivo de topologia (PDB ou GRO) com informações estruturais
+        xtc_entrada: Arquivo de trajetória XTC de entrada
+        xtc_saida: Arquivo de trajetória XTC de saída (reordenado)
+        start_serial: Serial do primeiro átomo do backbone
+        end_serial: Serial do último átomo do backbone
+        chain: Cadeia alvo
+        verbose: Mostrar mensagens de progresso
+    """
+    if not check_xtc_support():
+        sys.exit(1)
+
+    print("="*80)
+    print("PIPELINE UNIFICADO DE REORDENAÇÃO CAR-T - XTC")
+    print("="*80)
+    print(f"Arquivo de topologia: {topology_file}")
+    print(f"Trajetória de entrada: {xtc_entrada}")
+    print(f"Trajetória de saída: {xtc_saida}")
+    print("="*80)
+
+    # Carregar Universe
+    try:
+        universe = load_xtc_universe(topology_file, xtc_entrada)
+    except Exception as e:
+        print(f"ERRO ao carregar arquivos: {e}")
+        sys.exit(1)
+
+    total_frames = len(universe.trajectory)
+    print(f"\nTotal de frames detectados: {total_frames}")
+
+    if total_frames == 0:
+        print("ERRO: Nenhum frame encontrado na trajetória!")
+        return
+
+    # Processar cada frame e coletar estatísticas
+    frames_com_falha = []
+    frames_sucesso = 0
+    todas_expansoes = []
+
+    # Criar writer para saída XTC
+    with XTCWriter(xtc_saida, n_atoms=universe.atoms.n_atoms) as writer:
+        for frame_idx, ts in enumerate(universe.trajectory):
+            frame_num = frame_idx + 1
+            if verbose:
+                print(f"\rProcessando frame {frame_num}/{total_frames}...", end="", flush=True)
+
+            try:
+                # Converter frame para formato de átomos
+                atoms, lines = xtc_frame_to_atoms(universe)
+
+                # Criar dicionário de coordenadas (serial -> (x, y, z))
+                coords = extrair_coords_de_atoms(atoms)
+
+                # Executar as fases do pipeline
+                try:
+                    # FASE 1: Backbone
+                    coords, backbone_ids, expansoes = fase1_backbone(
+                        atoms, coords, start_serial, end_serial, verbose=False
+                    )
+                    aplicar_coords_para_atoms(atoms, coords)
+
+                    if expansoes:
+                        todas_expansoes.append((frame_num, expansoes))
+
+                    # FASE 2: HN, HA, O
+                    coords = extrair_coords_de_atoms(atoms)
+                    coords = fase2_hn_ha_o(atoms, coords, backbone_ids, verbose=False)
+                    aplicar_coords_para_atoms(atoms, coords)
+
+                    # FASE 3: CA-CB
+                    coords = extrair_coords_de_atoms(atoms)
+                    locked_serials = set(backbone_ids)
+                    atom_by_serial = {a['serial']: a for a in atoms}
+                    residues = get_backbone_residues(backbone_ids, atom_by_serial)
+                    for res in residues:
+                        for aname in ('HN', 'HA', 'O'):
+                            for a in atoms:
+                                if a['chain'] == res['chain'] and a['resseq'] == res['resseq'] and a['name'] == aname:
+                                    locked_serials.add(a['serial'])
+                    coords, locked_serials = fase3_ca_cb(atoms, coords, backbone_ids, locked_serials, verbose=False)
+                    aplicar_coords_para_atoms(atoms, coords)
+
+                    # FASES 4-10: Cadeias laterais
+                    locked = inicializar_locked_base(atoms)
+                    scope_indices = get_scope_indices(atoms, 576, 583, chain)
+
+                    processar_ile(atoms, locked, resseq=576, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "ILE", 576, chain)
+
+                    processar_thr(atoms, locked, resseq=577, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "THR", 577, chain)
+
+                    processar_leu(atoms, locked, resseq=578, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "LEU", 578, chain)
+
+                    processar_tyr(atoms, locked, resseq=579, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "TYR", 579, chain)
+
+                    processar_cys(atoms, locked, resseq=580, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "CYS", 580, chain)
+
+                    processar_lys(atoms, locked, resseq=581, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "LYS", 581, chain)
+
+                    processar_arg(atoms, locked, resseq=582, chain=chain, verbose=False, scope_indices=scope_indices)
+                    bloquear_residuo(atoms, locked, "ARG", 582, chain)
+
+                    # Atualizar coordenadas no Universe a partir dos átomos processados
+                    for atom in atoms:
+                        serial = atom['serial']
+                        # Encontrar o átomo correspondente no Universe
+                        for u_atom in universe.atoms:
+                            u_serial = u_atom.id if hasattr(u_atom, 'id') else u_atom.index + 1
+                            if u_serial == serial:
+                                u_atom.position = [atom['x'], atom['y'], atom['z']]
+                                break
+
+                    frames_sucesso += 1
+
+                except Exception as e:
+                    # Em caso de erro, manter coordenadas originais
+                    frames_com_falha.append((frame_num, str(e)))
+
+                # Escrever frame (reordenado ou original em caso de erro)
+                writer.write(universe.atoms)
+
+            except Exception as e:
+                frames_com_falha.append((frame_num, f"Erro geral: {str(e)}"))
+                writer.write(universe.atoms)
+
+    print(f"\rProcessamento concluído!                                    ")
+
+    # Relatório final
+    print("\n" + "="*80)
+    print("RELATÓRIO DE PROCESSAMENTO")
+    print("="*80)
+    print(f"Total de frames:      {total_frames}")
+    print(f"Frames com sucesso:   {frames_sucesso}")
+    print(f"Frames com falha:     {len(frames_com_falha)}")
+
+    if frames_com_falha:
+        print("\n" + "-"*80)
+        print("FRAMES COM FALHA (mantidos com coordenadas originais):")
+        print("-"*80)
+
+        # Gerar arquivo de diagnóstico
+        diag_file = xtc_saida.replace(".xtc", "_diagnostico.txt")
+        with open(diag_file, 'w') as f_diag:
+            f_diag.write("="*80 + "\n")
+            f_diag.write("RELATÓRIO DETALHADO DE DIAGNÓSTICO - FRAMES COM FALHA\n")
+            f_diag.write("="*80 + "\n")
+            f_diag.write(f"Arquivo de entrada: {xtc_entrada}\n")
+            f_diag.write(f"Total de frames: {total_frames}\n")
+            f_diag.write(f"Frames com falha: {len(frames_com_falha)}\n")
+            f_diag.write("="*80 + "\n\n")
+
+            for frame_num, erro in frames_com_falha:
+                primeira_linha = erro.split('\n')[0] if '\n' in erro else erro
+                print(f"  Frame {frame_num}: {primeira_linha[:100]}...")
+
+                f_diag.write(f"\n{'#'*80}\n")
+                f_diag.write(f"# FRAME {frame_num}\n")
+                f_diag.write(f"{'#'*80}\n\n")
+                f_diag.write(erro)
+                f_diag.write("\n\n")
+
+        print("\n" + "-"*80)
+        print(f"Diagnóstico detalhado salvo em: {diag_file}")
+
+    # Relatório de expansões
+    if todas_expansoes:
+        total_atomos_com_expansao = sum(len(exp) for _, exp in todas_expansoes)
+        frames_com_expansao = len(todas_expansoes)
+
+        print("\n" + "-"*80)
+        print("ESTATÍSTICAS DE EXPANSÃO DE JANELA DO BACKBONE:")
+        print("-"*80)
+        print(f"Frames que precisaram de expansão: {frames_com_expansao}/{total_frames}")
+        print(f"Total de átomos com expansão:      {total_atomos_com_expansao}")
+
+        expansao_file = xtc_saida.replace(".xtc", "_expansoes_backbone.txt")
+        with open(expansao_file, 'w') as f_exp:
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write("RELATÓRIO COMPLETO DE EXPANSÕES DE JANELA DO BACKBONE\n")
+            f_exp.write("=" * 90 + "\n")
+            f_exp.write(f"Arquivo de entrada: {xtc_entrada}\n")
+            f_exp.write(f"Total de frames: {total_frames}\n")
+            f_exp.write(f"Frames com expansão: {frames_com_expansao}\n")
+            f_exp.write(f"Total de átomos com expansão: {total_atomos_com_expansao}\n")
+            f_exp.write("=" * 90 + "\n\n")
+
+            for frame_num, expansoes in todas_expansoes:
+                relatorio = formatar_relatorio_expansoes(expansoes, frame_num)
+                f_exp.write(relatorio)
+                f_exp.write("\n\n")
+
+        print(f"Relatório de expansões salvo em:   {expansao_file}")
+
+    print("\n" + "="*80)
+    print(f"Arquivo de saída: {xtc_saida}")
+    print("="*80)
+    print("PIPELINE CONCLUÍDO!")
+    print("="*80)
+
+
+# ==============================================================================
 # SEÇÃO 14: INTERFACE DE LINHA DE COMANDO
 # ==============================================================================
 
-__version__ = "2.0"
+__version__ = "2.1"
 
 def main():
     """Função principal para execução via linha de comando."""
     import argparse
-    import os
 
     parser = argparse.ArgumentParser(
         prog='reordenacao-indices',
-        description='Pipeline de Reordenação de Índices para Estruturas CAR-T (v2.0)',
+        description='Pipeline de Reordenação de Índices para Estruturas CAR-T (v2.1)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Exemplos de uso:
+  # Arquivos PDB:
   %(prog)s trajetoria.pdb
   %(prog)s trajetoria.pdb saida.pdb
   %(prog)s -i entrada.pdb -o saida_reordenada.pdb
-  %(prog)s entrada.pdb -q  (modo silencioso)
+
+  # Arquivos XTC (requer topologia):
+  %(prog)s -t topologia.pdb trajetoria.xtc
+  %(prog)s -t topologia.pdb trajetoria.xtc saida.xtc
+  %(prog)s -t topologia.gro -i entrada.xtc -o saida_reordenada.xtc
+
+  # Modo silencioso:
+  %(prog)s entrada.pdb -q
+
+Novidades da versão 2.1:
+  - Suporte a arquivos XTC (trajetórias binárias do GROMACS)
+  - Requer MDAnalysis para processar arquivos XTC
+  - Detecção automática de tipo de arquivo pela extensão
 
 Correções da versão 2.0:
   - Função fase3_ca_cb com expansão dinâmica de janela
@@ -2051,23 +2436,28 @@ Correções da versão 2.0:
     parser.add_argument(
         'entrada',
         nargs='?',
-        help='Arquivo PDB de entrada'
+        help='Arquivo de entrada (PDB ou XTC)'
     )
     parser.add_argument(
         'saida',
         nargs='?',
         default=None,
-        help='Arquivo PDB de saída (padrão: <entrada>_reordenado.pdb)'
+        help='Arquivo de saída (padrão: <entrada>_reordenado.<ext>)'
     )
     parser.add_argument(
         '-i', '--input',
         dest='input_file',
-        help='Arquivo PDB de entrada (alternativo)'
+        help='Arquivo de entrada (alternativo)'
     )
     parser.add_argument(
         '-o', '--output',
         dest='output_file',
-        help='Arquivo PDB de saída (alternativo)'
+        help='Arquivo de saída (alternativo)'
+    )
+    parser.add_argument(
+        '-t', '--topology',
+        dest='topology_file',
+        help='Arquivo de topologia (PDB ou GRO) - obrigatório para arquivos XTC'
     )
     parser.add_argument(
         '-q', '--quiet',
@@ -2083,32 +2473,76 @@ Correções da versão 2.0:
     args = parser.parse_args()
 
     # Determinar arquivo de entrada
-    pdb_entrada = args.input_file or args.entrada
-    if not pdb_entrada:
+    arquivo_entrada = args.input_file or args.entrada
+    if not arquivo_entrada:
         parser.print_help()
         print("\nErro: arquivo de entrada é obrigatório.")
         sys.exit(1)
 
     # Verificar se arquivo existe
-    if not os.path.exists(pdb_entrada):
-        print(f"Erro: arquivo '{pdb_entrada}' não encontrado.")
+    if not os.path.exists(arquivo_entrada):
+        print(f"Erro: arquivo '{arquivo_entrada}' não encontrado.")
         sys.exit(1)
 
-    # Determinar arquivo de saída
-    pdb_saida = args.output_file or args.saida
-    if not pdb_saida:
-        base, ext = os.path.splitext(pdb_entrada)
-        pdb_saida = f"{base}_reordenado{ext}"
+    # Detectar tipo de arquivo
+    tipo_arquivo = get_file_type(arquivo_entrada)
 
     verbose = not args.quiet
 
-    try:
-        executar_pipeline_multiframe(pdb_entrada, pdb_saida, verbose=verbose)
-        if verbose:
-            print(f"\nProcessamento concluído com sucesso!")
-            print(f"Arquivo de saída: {pdb_saida}")
-    except Exception as e:
-        print(f"\nErro durante o processamento: {e}")
+    if tipo_arquivo == 'xtc':
+        # Processar arquivo XTC
+        if not args.topology_file:
+            print("Erro: arquivo de topologia (-t/--topology) é obrigatório para arquivos XTC.")
+            print("Exemplo: reordenacao-indices -t topologia.pdb trajetoria.xtc")
+            sys.exit(1)
+
+        if not os.path.exists(args.topology_file):
+            print(f"Erro: arquivo de topologia '{args.topology_file}' não encontrado.")
+            sys.exit(1)
+
+        # Verificar suporte a MDAnalysis
+        if not check_xtc_support():
+            sys.exit(1)
+
+        # Determinar arquivo de saída
+        xtc_saida = args.output_file or args.saida
+        if not xtc_saida:
+            base, ext = os.path.splitext(arquivo_entrada)
+            xtc_saida = f"{base}_reordenado{ext}"
+
+        try:
+            executar_pipeline_xtc(
+                args.topology_file,
+                arquivo_entrada,
+                xtc_saida,
+                verbose=verbose
+            )
+            if verbose:
+                print(f"\nProcessamento concluído com sucesso!")
+                print(f"Arquivo de saída: {xtc_saida}")
+        except Exception as e:
+            print(f"\nErro durante o processamento: {e}")
+            sys.exit(1)
+
+    elif tipo_arquivo == 'pdb':
+        # Processar arquivo PDB
+        pdb_saida = args.output_file or args.saida
+        if not pdb_saida:
+            base, ext = os.path.splitext(arquivo_entrada)
+            pdb_saida = f"{base}_reordenado{ext}"
+
+        try:
+            executar_pipeline_multiframe(arquivo_entrada, pdb_saida, verbose=verbose)
+            if verbose:
+                print(f"\nProcessamento concluído com sucesso!")
+                print(f"Arquivo de saída: {pdb_saida}")
+        except Exception as e:
+            print(f"\nErro durante o processamento: {e}")
+            sys.exit(1)
+
+    else:
+        print(f"Erro: tipo de arquivo não suportado: {arquivo_entrada}")
+        print("Formatos suportados: .pdb, .xtc")
         sys.exit(1)
 
 
