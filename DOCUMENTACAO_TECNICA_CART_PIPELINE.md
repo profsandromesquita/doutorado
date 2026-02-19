@@ -19,6 +19,7 @@
 9. [Tratamento de Erros](#9-tratamento-de-erros)
 10. [Exemplos de Uso](#10-exemplos-de-uso)
 11. [Considerações de Performance](#11-considerações-de-performance)
+- [Apêndice C: Limitações Conhecidas](#apêndice-c-limitações-conhecidas)
 
 ---
 
@@ -719,15 +720,81 @@ HZ1 HZ2 HZ3                  NH1  NH2
 
 ---
 
-## Apêndice C: Histórico de Versões
+## Apêndice C: Limitações Conhecidas
+
+### C.1 Topologia GRO incompatível com o pipeline (v2.1)
+
+A versão 2.1 introduziu suporte a trajetórias XTC via MDAnalysis, com a opção `-t/--topology` aceitando arquivos PDB ou GRO como topologia. Entretanto, **o uso de GRO como topologia não é funcional** na versão atual.
+
+#### Causa raiz
+
+O pipeline identifica os átomos de trabalho através de dois mecanismos que dependem de informações **ausentes** no formato GRO:
+
+**1. Chain ID (Identificador de cadeia)**
+
+O formato GRO não possui campo de chain ID. Quando o MDAnalysis lê um arquivo GRO:
+- `atom.segid` retorna `""` (string vazia) ou `"SYSTEM"`
+- `atom.chainID` não existe
+
+O pipeline filtra átomos por `chain == "B"` em funções críticas:
+
+| Função | Linha | Uso do chain ID |
+|--------|-------|-----------------|
+| `get_scope_serials()` | 367 | `a['chain'] == chain` |
+| `get_scope_indices()` | 386 | `a['chain'] == chain` |
+| `find_residue_atoms()` | 326 | `a['chain'] == chain` |
+| `find_atom_by_name()` | 334 | `a['chain'] == chain` |
+| `build_backbone_order()` | 441 | Validação de cadeia no backbone |
+| `processar_*()` (fases 4-10) | múltiplas | Filtragem por cadeia em todas as fases |
+
+**Resultado:** Nenhum átomo é encontrado no escopo → pipeline falha ou não processa nada.
+
+**2. Serial (numeração atômica)**
+
+Os valores `start_serial=8641` e `end_serial=8776` são hardcoded e referem-se à numeração serial do formato PDB original. No GRO, `atom.id` pode ser renumerado a partir de 1, fazendo com que `build_backbone_order()` não encontre os átomos de início/fim do backbone.
+
+#### Comparação entre PDB e GRO como topologia
+
+| Campo | PDB | GRO | Impacto no pipeline |
+|-------|-----|-----|---------------------|
+| Chain ID | `"B"` | `""` ou `"SYSTEM"` | **Crítico** — escopo não encontrado |
+| Serial | Compatível com 8641-8776 | Pode ser renumerado | **Crítico** — backbone não encontrado |
+| Resname | Correto | Correto | OK |
+| Resseq | Correto | Correto | OK |
+| Atom name | Correto | Correto | OK |
+
+#### Recomendação atual
+
+**Usar sempre PDB como arquivo de topologia.** Para obter um PDB a partir de uma simulação GROMACS:
+
+```bash
+# Extrair primeiro frame da trajetória como PDB
+gmx trjconv -f trajetoria.xtc -s topol.tpr -o referencia.pdb -dump 0
+
+# Ou converter um GRO existente
+gmx editconf -f sistema.gro -o referencia.pdb
+```
+
+#### Proposta de correção futura (v2.2)
+
+1. **Busca de cadeia independente de chain ID:** Localizar os resíduos-alvo (576-583) por `resname` + `resseq`, sem depender do campo `chain`.
+2. **Busca dinâmica de seriais:** Substituir `start_serial`/`end_serial` hardcoded por busca baseada em `(resname, resseq, atom_name)` — ex: encontrar o serial do N de ILE 576 e do OXT de GLY 583 dinamicamente.
+3. **Validação na inicialização:** Alertar o usuário em tempo de execução caso GRO seja usado e os campos `chain`/`serial` não correspondam ao esperado.
+
+---
+
+## Apêndice D: Histórico de Versões
 
 | Versão | Data | Alterações |
 |--------|------|------------|
 | 1.0 | Dez/2025 | Versão inicial multi-frame |
+| 2.0 | 2025 | Correção DFS backbone, restrição de escopo, expansão dinâmica de janela |
+| 2.1 | 2025 | Suporte a XTC via MDAnalysis, detecção automática de tipo de arquivo |
+| 2.1.1 | Fev/2026 | Documentação da limitação de topologia GRO; aviso em tempo de execução |
 
 ---
 
-## Apêndice D: Contato e Suporte
+## Apêndice E: Contato e Suporte
 
 **Repositório:** doutorado
 **Branch:** claude/analyze-cart-scripts-*
@@ -735,4 +802,4 @@ HZ1 HZ2 HZ3                  NH1  NH2
 
 ---
 
-*Documentação gerada em Dezembro de 2025*
+*Documentação gerada em Dezembro de 2025. Atualizada em Fevereiro de 2026.*

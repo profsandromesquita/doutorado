@@ -17,6 +17,33 @@ NOVIDADES v2.1:
 - Opção -t/--topology para especificar arquivo de topologia (PDB/GRO)
 - Dependência opcional: MDAnalysis (pip install MDAnalysis)
 
+LIMITAÇÃO CONHECIDA — TOPOLOGIA GRO:
+    Apesar de o parâmetro -t/--topology aceitar arquivos .gro, o uso de GRO como
+    topologia NÃO é funcional na versão atual. O motivo é duplo:
+
+    1. Chain ID ausente: O formato GRO não possui campo de chain ID (identificador
+       de cadeia). O MDAnalysis retorna atom.segid como "" ou "SYSTEM" em vez de
+       "B". Como o pipeline filtra átomos por chain == "B" em funções críticas
+       (get_scope_serials, get_scope_indices, find_residue_atoms, find_atom_by_name
+       e todas as fases de processamento), nenhum átomo é localizado no escopo e o
+       pipeline falha silenciosamente ou não processa nada.
+
+    2. Serial incompatível: Os valores start_serial=8641 e end_serial=8776 são
+       hardcoded e referem-se à numeração serial do formato PDB original. No GRO,
+       atom.id pode ser renumerado a partir de 1, fazendo com que build_backbone_order
+       não encontre os átomos de início/fim do backbone.
+
+    RECOMENDAÇÃO: Use sempre PDB como arquivo de topologia.
+
+    PROPOSTA DE CORREÇÃO FUTURA (v2.2):
+    - Implementar mapeamento automático de segid/chainID para GRO, detectando a
+      cadeia correta via resíduo-alvo (ex: buscar resseq 576-583 independente de chain).
+    - Substituir dependência de start_serial/end_serial fixos por busca dinâmica
+      baseada em (resname, resseq, atom_name), eliminando a necessidade de seriais
+      hardcoded.
+    - Adicionar validação na inicialização que alerte o usuário caso GRO seja usado
+      como topologia e os campos chain/serial não correspondam ao esperado.
+
 CORREÇÕES v2.0:
 - Função fase3_ca_cb com expansão dinâmica de janela
 - Restrição de escopo para evitar violações de cadeia
@@ -194,8 +221,12 @@ def load_xtc_universe(topology_file: str, trajectory_file: str) -> 'mda.Universe
     """
     Carrega uma trajetória XTC com sua topologia.
 
+    AVISO: Usar apenas PDB como topologia. Arquivos GRO não possuem chain ID,
+    o que causa falha na identificação de átomos por cadeia (ver LIMITAÇÃO CONHECIDA
+    no cabeçalho deste arquivo).
+
     Args:
-        topology_file: Arquivo de topologia (PDB, GRO, etc.)
+        topology_file: Arquivo de topologia (PDB recomendado; GRO não funcional)
         trajectory_file: Arquivo de trajetória XTC
 
     Returns:
@@ -2499,6 +2530,17 @@ Correções da versão 2.0:
         if not os.path.exists(args.topology_file):
             print(f"Erro: arquivo de topologia '{args.topology_file}' não encontrado.")
             sys.exit(1)
+
+        # Alertar se topologia for GRO (limitação conhecida)
+        if get_file_type(args.topology_file) == 'gro':
+            print("=" * 70)
+            print("AVISO: Topologia em formato GRO detectada.")
+            print("O formato GRO não possui chain ID, o que impede o pipeline de")
+            print("identificar corretamente os átomos da cadeia alvo (chain 'B').")
+            print("Os seriais também podem não corresponder aos valores esperados.")
+            print("RECOMENDAÇÃO: Use um arquivo PDB como topologia.")
+            print("  Exemplo: gmx trjconv -f traj.xtc -s topol.tpr -o ref.pdb -dump 0")
+            print("=" * 70)
 
         # Verificar suporte a MDAnalysis
         if not check_xtc_support():
